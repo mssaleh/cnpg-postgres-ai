@@ -140,7 +140,7 @@ jobs:
       # use `cosign sign --key cosign.key` instead — but keyless is
       # simpler in CI and rotates the cert per build.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@v4.1.0
 
       - name: Sign image (both registries, all tags)
         env:
