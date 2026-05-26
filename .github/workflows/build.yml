@@ -72,6 +72,18 @@ jobs:
       # docker CLI piping the password through stdin. buildx (via
       # build-push-action below) reads ~/.docker/config.json so the auth
       # propagates correctly to the push step.
+      - name: Verify Harbor secret values reach the workflow
+        run: |
+          echo "USERNAME len: ${#HARBOR_USERNAME}"
+          echo "PASSWORD len: ${#HARBOR_PASSWORD}"
+          echo "USERNAME first 5 chars: '${HARBOR_USERNAME:0:5}'"
+          # Print sha256 sum so we can compare to what we expect locally
+          echo "USERNAME sha256: $(printf '%s' "${HARBOR_USERNAME}" | sha256sum | head -c 16)"
+          echo "PASSWORD sha256: $(printf '%s' "${HARBOR_PASSWORD}" | sha256sum | head -c 16)"
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+
       - name: Login to Harbor (manual docker CLI)
         run: |
           echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_REGISTRY}" \
