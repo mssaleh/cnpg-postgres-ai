@@ -1,0 +1,17 @@
+# Build artifacts
+*.tar.gz
+*.deb
+*.zip
+
+# Local docker dev
+.docker/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Test outputs
+/tmp/
+parity-check.log
