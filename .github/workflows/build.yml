@@ -72,18 +72,6 @@ jobs:
       # docker CLI piping the password through stdin. buildx (via
       # build-push-action below) reads ~/.docker/config.json so the auth
       # propagates correctly to the push step.
-      - name: Verify Harbor secret values reach the workflow
-        run: |
-          echo "USERNAME len: ${#HARBOR_USERNAME}"
-          echo "PASSWORD len: ${#HARBOR_PASSWORD}"
-          echo "USERNAME first 5 chars: '${HARBOR_USERNAME:0:5}'"
-          # Print sha256 sum so we can compare to what we expect locally
-          echo "USERNAME sha256: $(printf '%s' "${HARBOR_USERNAME}" | sha256sum | head -c 16)"
-          echo "PASSWORD sha256: $(printf '%s' "${HARBOR_PASSWORD}" | sha256sum | head -c 16)"
-        env:
-          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
-          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
-
       - name: Login to Harbor (manual docker CLI)
         run: |
           echo "${HARBOR_PASSWORD}" | docker login "${HARBOR_REGISTRY}" \
@@ -116,7 +104,8 @@ jobs:
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "img_base=${IMG_BASE}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/build-push-action@v6
+      - id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
@@ -136,6 +125,42 @@ jobs:
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Sigstore keyless signing — uses GitHub's OIDC token to mint a
+      # short-lived certificate from Fulcio (no long-lived keypair). The
+      # signature is pushed as an OCI artifact alongside the image
+      # manifest in BOTH registries (a separate `cosign sign` invocation
+      # per tag because tag→registry mapping is in the path). Harbor 2.5+
+      # surfaces these signatures in the Artifacts view, replacing the
+      # "Not Signed" badge with a signed indicator.
+      #
+      # `--yes` accepts the Sigstore transparency-log inclusion prompt
+      # (the public Rekor log records each signature for audit). For an
+      # air-gapped equivalent, generate a long-lived cosign keypair and
+      # use `cosign sign --key cosign.key` instead — but keyless is
+      # simpler in CI and rotates the cert per build.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (both registries, all tags)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+          COSIGN_YES: "true"
+        run: |
+          set -euxo pipefail
+          if [ -z "${DIGEST}" ]; then
+            echo "ERROR: build digest not exported by build-push-action" >&2
+            exit 1
+          fi
+          # Sign each fully-qualified tag reference. cosign uploads the
+          # signature manifest to the registry hosting that tag, so both
+          # GHCR and Harbor get their own signature artifacts.
+          while IFS= read -r tag; do
+            [ -z "${tag}" ] && continue
+            echo "Signing ${tag}@${DIGEST}"
+            cosign sign "${tag}@${DIGEST}"
+          done <<< "${TAGS}"
 
       # Parity smoke test: bootstrap postgres ourselves (the CNPG image
       # strips docker-entrypoint.sh because the operator drives lifecycle),
