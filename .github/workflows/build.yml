@@ -66,6 +66,38 @@ jobs:
 
       # Harbor — uses a project-scoped robot account.
       # See c1 RUNBOOK §1 + the secrets in this repo's settings.
+      - name: Pre-login Harbor probe (diagnose unauthorized)
+        run: |
+          set -x
+          echo "--- DNS resolution ---"
+          getent hosts harbor.cluster.nxu.ae || true
+          echo "--- /v2/ unauthenticated (expect 401 with WWW-Authenticate) ---"
+          curl -sk -i -o /tmp/v2-anon.txt -w "HTTP=%{http_code}\n" "https://harbor.cluster.nxu.ae/v2/"
+          grep -i "^www-authenticate" /tmp/v2-anon.txt || echo "(no www-authenticate header)"
+          echo "--- /service/token with basic auth (expect 200 + token) ---"
+          curl -sk -u "${HARBOR_USERNAME_HEAD:0:6}...:${HARBOR_PASSWORD_HEAD:0:6}..." \
+            -o /tmp/token-resp.txt -w "HTTP=%{http_code}\n" \
+            "https://harbor.cluster.nxu.ae/service/token?service=harbor-registry&scope=repository:library/cnpg-postgres-ai:push,pull" || true
+          head -c 200 /tmp/token-resp.txt; echo
+          echo "--- /service/token with real basic auth (no stdout) ---"
+          curl -sk -u "${HARBOR_USERNAME}:${HARBOR_PASSWORD}" \
+            -o /tmp/token-resp2.txt -w "HTTP=%{http_code}\n" \
+            "https://harbor.cluster.nxu.ae/service/token?service=harbor-registry&scope=repository:library/cnpg-postgres-ai:push,pull"
+          # Print only safe info — token length + claim count
+          if [ -s /tmp/token-resp2.txt ]; then
+            python3 -c "
+          import json, sys
+          d = json.load(open('/tmp/token-resp2.txt'))
+          tok = d.get('token', '')
+          print(f'token-len={len(tok)}  expires_in={d.get(\"expires_in\")}  issued_at={d.get(\"issued_at\")}')
+          " || echo "(non-json)"
+          fi
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+          HARBOR_USERNAME_HEAD: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD_HEAD: ${{ secrets.HARBOR_PASSWORD }}
+
       - name: Login to Harbor
         uses: docker/login-action@v3
         with:
