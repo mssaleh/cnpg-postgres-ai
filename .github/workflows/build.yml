@@ -8,7 +8,6 @@ on:
       - 'LICENSE'
       - '.gitignore'
       - '.dockerignore'
-      - 'scripts/**'
   workflow_dispatch:
     inputs:
       pgvector_version:
@@ -55,6 +54,16 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: docker/setup-buildx-action@v4
+
+      - name: Local CI preflight
+        run: ./scripts/local-ci.sh "cnpg-postgres-ai:ci-${{ github.run_id }}"
+        env:
+          CACHE_BUST: ${{ github.run_id }}
+          PGVECTOR_VERSION: ${{ inputs.pgvector_version }}
+          POSTGIS_VERSION: ${{ inputs.postgis_version }}
+          TIMESCALEDB_VERSION: ${{ inputs.timescaledb_version }}
+          PGVECTORSCALE_VERSION: ${{ inputs.pgvectorscale_version }}
+          AGE_VERSION: ${{ inputs.age_version }}
 
       # GHCR — uses the built-in GITHUB_TOKEN.
       - name: Login to GHCR
@@ -117,6 +126,7 @@ jobs:
           # Pass-through optional pins from workflow_dispatch inputs.
           # All blank by default → image floats to latest.
           build-args: |
+            CACHE_BUST=${{ github.run_id }}
             PGVECTOR_VERSION=${{ inputs.pgvector_version }}
             POSTGIS_VERSION=${{ inputs.postgis_version }}
             TIMESCALEDB_VERSION=${{ inputs.timescaledb_version }}

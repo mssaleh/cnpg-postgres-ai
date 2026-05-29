@@ -44,13 +44,16 @@ SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+ARG CACHE_BUST=manual
+
 # --- Timescale apt repo (for timescaledb-2-postgresql-18) -----------------
 # pgvector + PostGIS + Apache AGE come from PGDG, which the CNPG base
 # already wires up.
 # pgvectorscale ships as a GitHub-release .deb (no apt repo for trixie yet)
 # and is installed in a second stage below.
 
-RUN apt-get update \
+RUN echo "cache-bust=${CACHE_BUST}" >/dev/null \
+ && apt-get update \
  && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg unzip \
@@ -101,11 +104,15 @@ ARG PGVECTORSCALE_VERSION=
 ARG TARGETARCH=amd64
 
 RUN if [ -z "${PGVECTORSCALE_VERSION}" ]; then \
-      PGVS_TAG=$(curl -fsSL https://api.github.com/repos/timescale/pgvectorscale/releases/latest \
-        | grep '"tag_name"' | head -1 | cut -d'"' -f4); \
+      PGVS_TAG=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+          https://github.com/timescale/pgvectorscale/releases/latest \
+        | sed -E 's#.*/tag/([^/?#]+).*#\1#'); \
     else \
       PGVS_TAG="${PGVECTORSCALE_VERSION}"; \
     fi \
+ && case "${PGVS_TAG}" in \
+      ""|http*) echo "failed to resolve pgvectorscale release tag: ${PGVS_TAG}"; exit 1 ;; \
+    esac \
  && case "${TARGETARCH}" in \
       amd64|arm64) PGVS_ARCH="${TARGETARCH}" ;; \
       *) echo "unsupported TARGETARCH=${TARGETARCH}"; exit 1 ;; \

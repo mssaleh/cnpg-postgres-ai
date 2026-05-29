@@ -12,6 +12,7 @@
 set -euxo pipefail
 
 IMG="${1:-ghcr.io/mssaleh/cnpg-postgres-ai:18-latest}"
+CONTAINER_NAME="${PARITY_CONTAINER_NAME:-pg-parity-$$}"
 
 if docker image inspect "${IMG}" >/dev/null 2>&1; then
   echo "Using local image ${IMG}"
@@ -19,7 +20,7 @@ else
   docker pull "${IMG}"
 fi
 
-docker run -d --name pg-parity \
+docker run -d --name "${CONTAINER_NAME}" \
   --entrypoint bash \
   "${IMG}" -c '
     set -e
@@ -31,18 +32,18 @@ docker run -d --name pg-parity \
     exec postgres -D "$PGDATA"
   '
 
-trap 'docker rm -f pg-parity || true' EXIT
+trap 'docker rm -f "${CONTAINER_NAME}" || true' EXIT
 
 # Wait for ready
 for i in $(seq 1 30); do
-  if docker exec pg-parity bash -c '/usr/lib/postgresql/18/bin/pg_isready -h localhost -U postgres' >/dev/null 2>&1; then
+  if docker exec "${CONTAINER_NAME}" bash -c '/usr/lib/postgresql/18/bin/pg_isready -h localhost -U postgres' >/dev/null 2>&1; then
     break
   fi
   sleep 2
 done
 
 # Step 1 — all 5 extensions install + versions
-docker exec pg-parity bash -c '
+docker exec "${CONTAINER_NAME}" bash -c '
   /usr/lib/postgresql/18/bin/psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "
     CREATE EXTENSION vector;
     CREATE EXTENSION vectorscale CASCADE;
@@ -56,7 +57,7 @@ docker exec pg-parity bash -c '
 '
 
 # Step 2 — AGE round-trip: create graph + Cypher query
-docker exec pg-parity bash -c '
+docker exec "${CONTAINER_NAME}" bash -c '
   /usr/lib/postgresql/18/bin/psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "
     LOAD '"'"'age'"'"';
     SET search_path = ag_catalog, \"\$user\", public;
