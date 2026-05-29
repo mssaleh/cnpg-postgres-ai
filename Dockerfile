@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1
 #
 # cnpg-postgres-ai
 #
@@ -20,8 +20,8 @@
 # Versioning policy:
 #   - PostgreSQL MAJOR is pinned to 18 via the CNPG base image tag.
 #   - All five extensions float to the LATEST patch available in the apt
-#     repos / GitHub releases at build time. Weekly CI re-builds pick up
-#     security patches automatically.
+#     repos / GitHub releases at build time. Weekly CI re-builds pull the
+#     latest CNPG base and apply available package updates.
 #   - To pin a specific patch level (e.g., for parity testing against an
 #     upstream Timescale image), pass build args:
 #       --build-arg TIMESCALEDB_VERSION=2.27.1
@@ -45,12 +45,13 @@ SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
 # --- Timescale apt repo (for timescaledb-2-postgresql-18) -----------------
-# pgvector + PostGIS come from PGDG, which the CNPG base already wires up.
+# pgvector + PostGIS + Apache AGE come from PGDG, which the CNPG base
+# already wires up.
 # pgvectorscale ships as a GitHub-release .deb (no apt repo for trixie yet)
 # and is installed in a second stage below.
-# Apache AGE is source-only — built in its own stage further down.
 
 RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg unzip \
  && install -d /usr/share/keyrings \
@@ -60,19 +61,23 @@ RUN apt-get update \
  && echo "deb [signed-by=/usr/share/keyrings/timescaledb.gpg] https://packagecloud.io/timescale/timescaledb/debian/ ${VERSION_CODENAME} main" \
       > /etc/apt/sources.list.d/timescaledb.list
 
-# --- pgvector + PostGIS (PGDG) and TimescaleDB (Timescale apt) ------------
+# --- pgvector + PostGIS + Apache AGE (PGDG) and TimescaleDB ---------------
 # Versions default to "latest" — if you pass *_VERSION build args, we pin.
 # apt versions in PGDG look like "0.8.2-1.pgdg13+1" — we anchor on the
 # upstream version and let the packaging suffix float (the +1 changes per
 # distro rebuild but not per upstream release).
+# AGE packages use Debian's rc suffix, so AGE_VERSION=1.7.0 pins
+# "1.7.0~rc0-*".
 
 ARG PGVECTOR_VERSION=
 ARG POSTGIS_VERSION=
 ARG TIMESCALEDB_VERSION=
+ARG AGE_VERSION=
 
 RUN apt-get update \
  && PGVECTOR_PKG="postgresql-18-pgvector${PGVECTOR_VERSION:+=${PGVECTOR_VERSION}*}" \
  && POSTGIS_PKG="postgresql-18-postgis-3${POSTGIS_VERSION:+=${POSTGIS_VERSION}*}" \
+ && AGE_PKG="postgresql-18-age${AGE_VERSION:+=${AGE_VERSION}~rc0*}" \
  && if [ -n "${TIMESCALEDB_VERSION}" ]; then \
       TS_PKG="timescaledb-2-${TIMESCALEDB_VERSION}-postgresql-18"; \
       TS_LOADER_PKG="timescaledb-2-loader-postgresql-18=${TIMESCALEDB_VERSION}~debian13*"; \
@@ -80,9 +85,10 @@ RUN apt-get update \
       TS_PKG="timescaledb-2-postgresql-18"; \
       TS_LOADER_PKG="timescaledb-2-loader-postgresql-18"; \
     fi \
- && apt-get install -y --no-install-recommends \
+ && apt-get install -y --no-install-recommends --allow-downgrades \
       "${PGVECTOR_PKG}" \
       "${POSTGIS_PKG}" \
+      "${AGE_PKG}" \
       "${TS_PKG}" \
       "${TS_LOADER_PKG}"
 
@@ -110,44 +116,6 @@ RUN if [ -z "${PGVECTORSCALE_VERSION}" ]; then \
  && unzip -d /tmp/pgvs /tmp/pgvs.zip \
  && dpkg -i "/tmp/pgvs/pgvectorscale-postgresql-18_${PGVS_TAG}-Linux_${PGVS_ARCH}.deb" \
  && rm -rf /tmp/pgvs /tmp/pgvs.zip
-
-# --- Apache AGE (source build) --------------------------------------------
-# AGE has no apt package. Build from source against PG18.
-#
-# Release tag format: `PG18/v<X.Y.Z>-rc0` (yes, "-rc0" is the convention for
-# their stable releases — they never drop the suffix). The source tarball
-# is named `apache-age-<X.Y.Z>-src.tar.gz` (no -rcN in filename).
-#
-# Auto-detect: query the releases API, find the first tag starting with
-# `PG18/v`, extract the X.Y.Z-rcN portion.
-# Pin override: pass AGE_VERSION=1.7.0 (the chart appends -rc0 itself).
-
-ARG AGE_VERSION=
-
-RUN apt-get install -y --no-install-recommends \
-      build-essential flex bison postgresql-server-dev-18 \
- && if [ -z "${AGE_VERSION}" ]; then \
-      AGE_VER=$(curl -fsSL https://api.github.com/repos/apache/age/releases \
-        | grep '"tag_name"' \
-        | grep 'PG18/v' \
-        | head -1 \
-        | sed -E 's/.*"PG18\/v([^"]+)".*/\1/'); \
-    else \
-      AGE_VER="${AGE_VERSION}-rc0"; \
-    fi \
- && AGE_VER_PLAIN=$(echo "${AGE_VER}" | sed -E 's/-rc[0-9]+$//') \
- && echo "Building Apache AGE ${AGE_VER} (plain: ${AGE_VER_PLAIN})" \
- && curl -fsSL -o /tmp/age.tar.gz \
-      "https://github.com/apache/age/releases/download/PG18%2Fv${AGE_VER}/apache-age-${AGE_VER_PLAIN}-src.tar.gz" \
- && mkdir -p /tmp/age \
- && tar -xzf /tmp/age.tar.gz -C /tmp/age --strip-components=1 \
- && cd /tmp/age \
- && make PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config -j$(nproc) \
- && make PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config install \
- && cd / \
- && rm -rf /tmp/age /tmp/age.tar.gz \
- && apt-get purge -y --auto-remove \
-      build-essential flex bison postgresql-server-dev-18
 
 # --- Cleanup --------------------------------------------------------------
 # Drop build-only packages and apt caches. Keep ca-certificates (needed at

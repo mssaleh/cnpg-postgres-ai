@@ -13,7 +13,11 @@ set -euxo pipefail
 
 IMG="${1:-ghcr.io/mssaleh/cnpg-postgres-ai:18-latest}"
 
-docker pull "${IMG}"
+if docker image inspect "${IMG}" >/dev/null 2>&1; then
+  echo "Using local image ${IMG}"
+else
+  docker pull "${IMG}"
+fi
 
 docker run -d --name pg-parity \
   --entrypoint bash \

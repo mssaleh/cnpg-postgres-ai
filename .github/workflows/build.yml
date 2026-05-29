@@ -52,13 +52,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # GHCR — uses the built-in GITHUB_TOKEN.
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
@@ -105,10 +105,11 @@ jobs:
           echo "img_base=${IMG_BASE}" >> "$GITHUB_OUTPUT"
 
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
+          pull: true
           # amd64 only for now — c1 nodes are all x86_64 NUCs / Dell. Add
           # arm64 to the platforms list if/when we run on ARM hardware.
           platforms: linux/amd64
@@ -140,7 +141,7 @@ jobs:
       # use `cosign sign --key cosign.key` instead — but keyless is
       # simpler in CI and rotates the cert per build.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.0
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Sign image (both registries, all tags)
         env:

@@ -12,7 +12,7 @@ CloudNativePG-compatible PostgreSQL 18 image with an AI / graph extension bundle
 
 CloudNativePG (CNPG) drives Postgres lifecycle as UID 26 and replaces Patroni / Spilo with its own integrated backup + failover. Standard distro `postgres:N` images and the upstream `timescale/timescaledb-ha:pgN-tsM-oss` image don't fit cleanly — this image starts from `ghcr.io/cloudnative-pg/postgresql:18-system-trixie` (CNPG's official baseline) and layers the five extensions on top.
 
-Suitable for: AI-agent platforms (long-term memory backed by pgvector + DiskANN), knowledge-graph workloads (AGE), geospatial + time-series (PostGIS + TimescaleDB) — typically all four together in modern data products.
+Suitable for: AI-agent platforms (long-term memory backed by pgvector + DiskANN), knowledge-graph workloads (AGE), geospatial + time-series (PostGIS + TimescaleDB) — typically all five together in modern data products.
 
 ## Image tags
 
@@ -41,18 +41,17 @@ spec:
 
   postgresql:
     # TimescaleDB MUST be in shared_preload_libraries (it's a hard requirement).
-    # Apache AGE works without preload (LOAD 'age' per-session) but preloading
-    # avoids the per-session LOAD and works better with connection pools.
-    # AGE adds ~1MB resident memory per backend whether or not graphs are used,
-    # so leave AGE preload off unless your app uses graph queries.
+    # Apache AGE is preloaded so app sessions can use openCypher without
+    # a per-session LOAD, which is friendlier to connection pools.
     shared_preload_libraries:
       - timescaledb
-      # - age   # uncomment if your app uses openCypher / AGE
+      - age
     parameters:
       # pgvectorscale's DiskANN index builder benefits from generous
       # maintenance_work_mem on initial index creation. Default 64 MB
       # spills to disk for vector tables > ~1M rows.
       maintenance_work_mem: "1GB"
+      search_path: 'ag_catalog, "$user", public'
 
   bootstrap:
     initdb:
@@ -63,17 +62,14 @@ spec:
         - CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE;
         - CREATE EXTENSION IF NOT EXISTS postgis;
         - CREATE EXTENSION IF NOT EXISTS timescaledb;
-        # Apache AGE — uncomment if you want graph features
-        # - CREATE EXTENSION IF NOT EXISTS age;
-        # - LOAD 'age';
-        # - SET search_path = ag_catalog, "$user", public;
+        - CREATE EXTENSION IF NOT EXISTS age;
 ```
 
 ## Version policy
 
 - **PostgreSQL** is pinned to MAJOR 18 via the CNPG base image tag.
 - All five extensions float to the latest patch available in the PGDG / Timescale apt repos / GitHub releases at build time.
-- Weekly CI rebuild (Sun 02:00 UTC) picks up security patches automatically.
+- Weekly CI rebuild (Sun 02:00 UTC) pulls the current `18-system-trixie` CNPG base image and applies available package updates.
 
 To pin a specific patch level (parity testing, regression debugging), use the workflow_dispatch inputs:
 
@@ -92,7 +88,7 @@ A parity step runs in CI against the freshly-built image: it initdbs Postgres, s
 
 ## Apache AGE specifics
 
-AGE provides openCypher graph queries on top of relational PostgreSQL. After `CREATE EXTENSION age` you typically run:
+AGE provides openCypher graph queries on top of relational PostgreSQL. The default CNPG example above preloads AGE and sets `search_path` cluster-wide. If you remove AGE from `shared_preload_libraries`, run `LOAD 'age'` per session before using `cypher()`:
 
 ```sql
 LOAD 'age';
@@ -106,7 +102,7 @@ SELECT * FROM cypher('myapp', $$
 $$) AS (n agtype, m agtype);
 ```
 
-If you preload AGE via `shared_preload_libraries`, the `LOAD 'age'` line isn't needed. Set `search_path` in `postgresql.parameters` for cluster-wide effect, or via `ALTER ROLE <app> SET search_path` per-user.
+With AGE preloaded, the `LOAD 'age'` line isn't needed. Keep `search_path` in `postgresql.parameters` for cluster-wide effect, or move it to `ALTER ROLE <app> SET search_path` if only selected roles should use AGE.
 
 ## License
 
