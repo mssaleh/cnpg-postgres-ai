@@ -16,10 +16,10 @@ Suitable for: AI-agent platforms (long-term memory backed by pgvector + DiskANN)
 
 ## Image tags
 
-Published to **both** registries on every build:
+Published to GHCR on every build. Harbor is an internal best-effort mirror and is skipped when the cluster hosting Harbor is offline:
 
 - `ghcr.io/mssaleh/cnpg-postgres-ai:<tag>` — public
-- `harbor.cluster.nxu.ae/library/cnpg-postgres-ai:<tag>` — internal mirror (for the c1 cluster)
+- `harbor.cluster.nxu.ae/library/cnpg-postgres-ai:<tag>` — internal mirror (for the c1 cluster, when reachable)
 
 Tag scheme:
 
