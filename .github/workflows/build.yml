@@ -42,8 +42,8 @@ permissions:
 
 env:
   GHCR_REGISTRY: ghcr.io
-  HARBOR_REGISTRY: harbor.cluster.nxu.ae
-  HARBOR_PROJECT: library
+  HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
+  HARBOR_PROJECT: ${{ vars.HARBOR_PROJECT }}
   IMAGE_NAME: ${{ github.repository }}     # e.g. mssaleh/cnpg-postgres-ai
 
 jobs:
@@ -73,16 +73,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Harbor is an internal mirror and may be offline when the c1 cluster
-      # is powered down. Treat it as best-effort: GHCR is enough for a
-      # successful build, and Harbor gets mirrored when reachable.
       - id: harbor
         name: Login to Harbor (best effort)
         run: |
           set +e
-          if [ -z "${HARBOR_USERNAME}" ] || [ -z "${HARBOR_PASSWORD}" ]; then
+          if [ -z "${HARBOR_REGISTRY}" ] || [ -z "${HARBOR_USERNAME}" ] || [ -z "${HARBOR_PASSWORD}" ]; then
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Harbor credentials are not configured; skipping Harbor mirror"
+            echo "::warning::Harbor registry or credentials are not configured; skipping Harbor mirror"
             exit 0
           fi
 
@@ -110,6 +107,13 @@ jobs:
           SHA=$(git rev-parse --short HEAD)
           # Extract just the image base name (drop the org prefix)
           IMG_BASE=$(echo "${IMAGE_NAME}" | awk -F/ '{print $NF}')
+          HARBOR_PROJECT="${HARBOR_PROJECT:-library}"
+
+          if [ "${{ github.event.repository.owner.type }}" = "Organization" ]; then
+            PACKAGE_URL="https://github.com/orgs/${{ github.repository_owner }}/packages/container/package/${IMG_BASE}"
+          else
+            PACKAGE_URL="https://github.com/users/${{ github.repository_owner }}/packages/container/package/${IMG_BASE}"
+          fi
 
           {
             echo "ghcr_tags<<EOF"
@@ -117,16 +121,26 @@ jobs:
             echo "${GHCR_REGISTRY}/${IMAGE_NAME}:18-${DATE}-${SHA}"
             echo "EOF"
             echo "harbor_tags<<EOF"
-            echo "${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-latest"
-            echo "${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-${DATE}-${SHA}"
+            if [ -n "${HARBOR_REGISTRY}" ]; then
+              echo "${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-latest"
+              echo "${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-${DATE}-${SHA}"
+            fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
           echo "date=${DATE}" >> "$GITHUB_OUTPUT"
           echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
           echo "img_base=${IMG_BASE}" >> "$GITHUB_OUTPUT"
           echo "ghcr_image=${GHCR_REGISTRY}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
-          echo "harbor_latest=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-latest" >> "$GITHUB_OUTPUT"
-          echo "harbor_immutable=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-${DATE}-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "harbor_project=${HARBOR_PROJECT}" >> "$GITHUB_OUTPUT"
+          echo "package_url=${PACKAGE_URL}" >> "$GITHUB_OUTPUT"
+          echo "package_settings_url=${PACKAGE_URL}/settings" >> "$GITHUB_OUTPUT"
+          if [ -n "${HARBOR_REGISTRY}" ]; then
+            echo "harbor_latest=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-latest" >> "$GITHUB_OUTPUT"
+            echo "harbor_immutable=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-${DATE}-${SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "harbor_latest=" >> "$GITHUB_OUTPUT"
+            echo "harbor_immutable=" >> "$GITHUB_OUTPUT"
+          fi
 
       - id: build_ghcr
         name: Build and push image to GHCR
@@ -135,10 +149,19 @@ jobs:
           context: .
           push: true
           pull: true
-          # amd64 only for now — c1 nodes are all x86_64 NUCs / Dell. Add
-          # arm64 to the platforms list if/when we run on ARM hardware.
+          # amd64 only for now . Add arm64 to the platforms list if/when we run on ARM hardware.
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.ghcr_tags }}
+          labels: |
+            org.opencontainers.image.title=cnpg-postgres-ai
+            org.opencontainers.image.description=CloudNativePG-compatible Postgres 18 with pgvector, pgvectorscale, PostGIS, TimescaleDB, and Apache AGE.
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+          annotations: |
+            index,manifest:org.opencontainers.image.description=CloudNativePG-compatible Postgres 18 with pgvector, pgvectorscale, PostGIS, TimescaleDB, and Apache AGE.
+            index,manifest:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            index,manifest:org.opencontainers.image.licenses=Apache-2.0
           # Pass-through optional pins from workflow_dispatch inputs.
           # All blank by default → image floats to latest.
           build-args: |
@@ -152,6 +175,35 @@ jobs:
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Verify GHCR public visibility
+        env:
+          IMAGE: ${{ steps.meta.outputs.ghcr_image }}:18-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.sha }}
+          PACKAGE_URL: ${{ steps.meta.outputs.package_url }}
+          PACKAGE_SETTINGS_URL: ${{ steps.meta.outputs.package_settings_url }}
+        run: |
+          set -euo pipefail
+          tmp_config="$(mktemp -d)"
+          trap 'rm -rf "${tmp_config}"' EXIT
+
+          if DOCKER_CONFIG="${tmp_config}" docker buildx imagetools inspect "${IMAGE}" >/dev/null; then
+            echo "GHCR image is publicly readable: ${IMAGE}"
+            exit 0
+          fi
+
+          cat >&2 <<EOF
+          ERROR: ${IMAGE} was pushed to GHCR but is not anonymously readable.
+
+          For this public repository, make the package public once:
+            ${PACKAGE_SETTINGS_URL}
+
+          GitHub path:
+            Package page -> Package settings -> Danger Zone -> Change visibility -> Public
+
+          Package page:
+            ${PACKAGE_URL}
+          EOF
+          exit 1
 
       - id: mirror_harbor
         name: Mirror image to Harbor (best effort)
@@ -241,8 +293,8 @@ jobs:
             if [ "${HARBOR_AVAILABLE}" = "true" ] && [ "${HARBOR_MIRROR_OUTCOME}" = "success" ]; then
               echo "**Harbor (internal mirror, best effort):**"
               echo "\`\`\`"
-              echo "${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${{ steps.meta.outputs.img_base }}:18-latest"
-              echo "${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${{ steps.meta.outputs.img_base }}:18-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.sha }}"
+              echo "${HARBOR_REGISTRY}/${{ steps.meta.outputs.harbor_project }}/${{ steps.meta.outputs.img_base }}:18-latest"
+              echo "${HARBOR_REGISTRY}/${{ steps.meta.outputs.harbor_project }}/${{ steps.meta.outputs.img_base }}:18-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.sha }}"
               echo "\`\`\`"
               echo "Harbor signature status: ${HARBOR_SIGN_OUTCOME:-skipped}"
             else

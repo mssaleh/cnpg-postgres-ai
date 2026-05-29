@@ -14,19 +14,20 @@ CloudNativePG (CNPG) drives Postgres lifecycle as UID 26 and replaces Patroni / 
 
 Suitable for: AI-agent platforms (long-term memory backed by pgvector + DiskANN), knowledge-graph workloads (AGE), geospatial + time-series (PostGIS + TimescaleDB) — typically all five together in modern data products.
 
-## Image tags
+## Image Tags
 
-Published to GHCR on every build. Harbor is an internal best-effort mirror and is skipped when the cluster hosting Harbor is offline:
+Published to GHCR on every build:
 
 - `ghcr.io/mssaleh/cnpg-postgres-ai:<tag>` — public
-- `harbor.cluster.nxu.ae/library/cnpg-postgres-ai:<tag>` — internal mirror (for the c1 cluster, when reachable)
+
+An optional Harbor mirror can be enabled in GitHub Actions with repository variables `HARBOR_REGISTRY` and `HARBOR_PROJECT` plus secrets `HARBOR_USERNAME` and `HARBOR_PASSWORD`. The mirror is best effort; GHCR is the required publish target.
+
+The first GHCR package created under a personal account is private by default. If CI says the image was pushed but is not anonymously readable, open the package settings and change visibility to Public once.
 
 Tag scheme:
 
 - `18-latest` — floating, always newest weekly build
 - `18-YYYY-MM-DD-<sha>` — immutable, **use this in production CNPG `Cluster.spec.imageName`**
-
-The Hindsight / kagent / etc. CNPG clusters in c1 pin to the dated tag. The floating tag is for dev/test only — CNPG's webhook validator (RUNBOOK §11 LL-33) requires the tag to start with the PG major (here, `18-`).
 
 ## Usage in CloudNativePG
 
