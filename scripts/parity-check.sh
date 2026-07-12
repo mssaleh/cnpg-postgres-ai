@@ -35,7 +35,7 @@ docker run -d --name "${CONTAINER_NAME}" \
 trap 'docker rm -f "${CONTAINER_NAME}" || true' EXIT
 
 # Wait for ready
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   if docker exec "${CONTAINER_NAME}" bash -c '/usr/lib/postgresql/18/bin/pg_isready -h localhost -U postgres' >/dev/null 2>&1; then
     break
   fi

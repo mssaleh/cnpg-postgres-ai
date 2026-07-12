@@ -69,23 +69,59 @@ spec:
 ## Version policy
 
 - **PostgreSQL** is pinned to MAJOR 18 via the CNPG base image tag.
-- All five extensions float to the latest patch available in the PGDG / Timescale apt repos / GitHub releases at build time.
-- Weekly CI rebuild (Sun 02:00 UTC) pulls the current `18-system-trixie` CNPG base image and applies available package updates.
+- Extension versions are explicit release pins in `Dockerfile`: pgvector 0.8.5,
+  pgvectorscale 0.9.0, PostGIS 3.6.4, TimescaleDB 2.28.2, and Apache AGE 1.8.0.
+- Weekly CI rebuild (Sun 02:00 UTC) pulls base-image and packaging security updates
+  without silently changing extension SQL versions.
+- An extension bump is a reviewed publishing commit. CI snapshots the previous
+  `18-latest`, creates real extension/graph data, restarts that persistent database
+  on the candidate image, runs the supported upgrades, and verifies the graph.
 
 To pin a specific patch level (parity testing, regression debugging), use the workflow_dispatch inputs:
 
 ```
 gh workflow run build.yml \
-  -f pgvector_version=0.8.2 \
-  -f postgis_version=3.6.3 \
-  -f timescaledb_version=2.27.1 \
+  -f pgvector_version=0.8.5 \
+  -f postgis_version=3.6.4 \
+  -f timescaledb_version=2.28.2 \
   -f pgvectorscale_version=0.9.0 \
-  -f age_version=1.7.0
+  -f age_version=1.8.0
 ```
 
 ## Parity check
 
 A parity step runs in CI against the freshly-built image: it initdbs Postgres, sets `shared_preload_libraries='timescaledb,age'`, starts the cluster, and runs `CREATE EXTENSION` for all five plus a basic AGE graph operation. Build fails if any extension is missing or fails to load.
+
+CI also runs persistent-upgrade parity from the previously published image. This
+guards the production distinction between replacing extension binaries in an image
+and updating each database's installed extension catalog.
+
+## Upgrading a persistent CNPG database
+
+Replacing `spec.imageName` does **not** run extension upgrade SQL. After CNPG has
+rolled all instances onto the new immutable image, connect to every application
+database as its extension owner and compare installed/default versions:
+
+```sql
+SELECT name, default_version, installed_version
+FROM pg_available_extensions
+WHERE name IN ('vector','vectorscale','postgis','timescaledb','age')
+ORDER BY name;
+```
+
+Apply required upgrades in dependency order during the release window:
+
+```sql
+ALTER EXTENSION vector UPDATE;
+ALTER EXTENSION timescaledb UPDATE;
+ALTER EXTENSION vectorscale UPDATE;
+ALTER EXTENSION postgis UPDATE;
+ALTER EXTENSION age UPDATE;
+```
+
+Take a backup first, use the immutable image tag, and run an application-specific
+smoke test before reopening writes. Never assume a successful fresh-install parity
+test proves an existing database is upgrade-safe.
 
 ## Apache AGE specifics
 

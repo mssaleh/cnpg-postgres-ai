@@ -19,16 +19,16 @@
 #
 # Versioning policy:
 #   - PostgreSQL MAJOR is pinned to 18 via the CNPG base image tag.
-#   - All five extensions float to the LATEST patch available in the apt
-#     repos / GitHub releases at build time. Weekly CI re-builds pull the
-#     latest CNPG base and apply available package updates.
-#   - To pin a specific patch level (e.g., for parity testing against an
-#     upstream Timescale image), pass build args:
-#       --build-arg TIMESCALEDB_VERSION=2.27.1
+#   - Extension versions are explicit release inputs. Weekly CI rebuilds pull
+#     base-image/package security updates without silently changing extension
+#     SQL ABIs underneath persistent databases.
+#   - To test a different extension release, pass build args and update the
+#     pins below in the publishing commit once upgrade parity passes:
+#       --build-arg TIMESCALEDB_VERSION=2.28.2
 #       --build-arg PGVECTORSCALE_VERSION=0.9.0
-#       --build-arg PGVECTOR_VERSION=0.8.2
-#       --build-arg POSTGIS_VERSION=3.6.3
-#       --build-arg AGE_VERSION=1.7.0
+#       --build-arg PGVECTOR_VERSION=0.8.5
+#       --build-arg POSTGIS_VERSION=3.6.4
+#       --build-arg AGE_VERSION=1.8.0
 
 ARG CNPG_BASE_TAG=18-system-trixie
 FROM ghcr.io/cloudnative-pg/postgresql:${CNPG_BASE_TAG}
@@ -65,19 +65,24 @@ RUN echo "cache-bust=${CACHE_BUST}" >/dev/null \
       > /etc/apt/sources.list.d/timescaledb.list
 
 # --- pgvector + PostGIS + Apache AGE (PGDG) and TimescaleDB ---------------
-# Versions default to "latest" — if you pass *_VERSION build args, we pin.
+# Versions default to explicit release pins — a blank build arg also resolves
+# to the pin, so scheduled/workflow-dispatch builds are byte-semantically stable.
 # apt versions in PGDG look like "0.8.2-1.pgdg13+1" — we anchor on the
 # upstream version and let the packaging suffix float (the +1 changes per
 # distro rebuild but not per upstream release).
 # AGE packages use Debian's rc suffix, so AGE_VERSION=1.7.0 pins
 # "1.7.0~rc0-*".
 
-ARG PGVECTOR_VERSION=
-ARG POSTGIS_VERSION=
-ARG TIMESCALEDB_VERSION=
-ARG AGE_VERSION=
+ARG PGVECTOR_VERSION
+ARG POSTGIS_VERSION
+ARG TIMESCALEDB_VERSION
+ARG AGE_VERSION
 
 RUN apt-get update \
+ && PGVECTOR_VERSION="${PGVECTOR_VERSION:-0.8.5}" \
+ && POSTGIS_VERSION="${POSTGIS_VERSION:-3.6.4}" \
+ && TIMESCALEDB_VERSION="${TIMESCALEDB_VERSION:-2.28.2}" \
+ && AGE_VERSION="${AGE_VERSION:-1.8.0}" \
  && PGVECTOR_PKG="postgresql-18-pgvector${PGVECTOR_VERSION:+=${PGVECTOR_VERSION}*}" \
  && POSTGIS_PKG="postgresql-18-postgis-3${POSTGIS_VERSION:+=${POSTGIS_VERSION}*}" \
  && AGE_PKG="postgresql-18-age${AGE_VERSION:+=${AGE_VERSION}~rc0*}" \
@@ -100,16 +105,10 @@ RUN apt-get update \
 # plus a dbgsym .deb. We dpkg -i the runtime; dbgsym is skipped to keep
 # the image lean.
 
-ARG PGVECTORSCALE_VERSION=
+ARG PGVECTORSCALE_VERSION
 ARG TARGETARCH=amd64
 
-RUN if [ -z "${PGVECTORSCALE_VERSION}" ]; then \
-      PGVS_TAG=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
-          https://github.com/timescale/pgvectorscale/releases/latest \
-        | sed -E 's#.*/tag/([^/?#]+).*#\1#'); \
-    else \
-      PGVS_TAG="${PGVECTORSCALE_VERSION}"; \
-    fi \
+RUN PGVS_TAG="${PGVECTORSCALE_VERSION:-0.9.0}" \
  && case "${PGVS_TAG}" in \
       ""|http*) echo "failed to resolve pgvectorscale release tag: ${PGVS_TAG}"; exit 1 ;; \
     esac \

@@ -11,23 +11,23 @@ on:
   workflow_dispatch:
     inputs:
       pgvector_version:
-        description: "Pin pgvector version (blank = latest in PGDG)"
+        description: "Override pgvector version (blank = Dockerfile release pin)"
         required: false
         default: ""
       postgis_version:
-        description: "Pin PostGIS version (blank = latest in PGDG)"
+        description: "Override PostGIS version (blank = Dockerfile release pin)"
         required: false
         default: ""
       timescaledb_version:
-        description: "Pin TimescaleDB version (blank = latest in Timescale apt)"
+        description: "Override TimescaleDB version (blank = Dockerfile release pin)"
         required: false
         default: ""
       pgvectorscale_version:
-        description: "Pin pgvectorscale tag (blank = latest GH release)"
+        description: "Override pgvectorscale tag (blank = Dockerfile release pin)"
         required: false
         default: ""
       age_version:
-        description: "Pin Apache AGE version (blank = latest PG18; format: 1.7.0)"
+        description: "Override Apache AGE version (blank = Dockerfile release pin)"
         required: false
         default: ""
   # Weekly rebuild for security patches in the base image + extensions.
@@ -59,6 +59,8 @@ jobs:
         run: ./scripts/local-ci.sh "cnpg-postgres-ai:ci-${{ github.run_id }}"
         env:
           CACHE_BUST: ${{ github.run_id }}
+          # Snapshotted before this run publishes, so this is the prior release.
+          UPGRADE_FROM_IMAGE: ghcr.io/${{ github.repository }}:18-latest
           PGVECTOR_VERSION: ${{ inputs.pgvector_version }}
           POSTGIS_VERSION: ${{ inputs.postgis_version }}
           TIMESCALEDB_VERSION: ${{ inputs.timescaledb_version }}
@@ -162,8 +164,7 @@ jobs:
             index,manifest:org.opencontainers.image.description=CloudNativePG-compatible Postgres 18 with pgvector, pgvectorscale, PostGIS, TimescaleDB, and Apache AGE.
             index,manifest:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             index,manifest:org.opencontainers.image.licenses=Apache-2.0
-          # Pass-through optional pins from workflow_dispatch inputs.
-          # All blank by default → image floats to latest.
+          # Blank overrides resolve to the explicit release pins in Dockerfile.
           build-args: |
             CACHE_BUST=${{ github.run_id }}
             PGVECTOR_VERSION=${{ inputs.pgvector_version }}
