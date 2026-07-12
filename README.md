@@ -112,8 +112,8 @@ ORDER BY name;
 Apply required upgrades in dependency order during the release window:
 
 ```sql
-ALTER EXTENSION vector UPDATE;
 ALTER EXTENSION timescaledb UPDATE;
+ALTER EXTENSION vector UPDATE;
 ALTER EXTENSION vectorscale UPDATE;
 ALTER EXTENSION postgis UPDATE;
 ALTER EXTENSION age UPDATE;
