@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Persistent-upgrade parity: create extensions and graph data on the previous
 # public image, restart the same PGDATA on the candidate image, perform the
-# supported ALTER EXTENSION updates, and prove AGE data/query compatibility.
+# supported ALTER EXTENSION updates, and prove TimescaleDB, vector/DiskANN,
+# PostGIS, and AGE data/query compatibility.
 
 set -euxo pipefail
 
@@ -60,6 +61,35 @@ docker exec "${OLD_CONTAINER}" psql -h localhost -U postgres -d postgres -v ON_E
   CREATE EXTENSION postgis;
   CREATE EXTENSION timescaledb;
   CREATE EXTENSION age;
+
+  CREATE TABLE upgrade_metrics (
+    observed_at timestamptz NOT NULL,
+    device text NOT NULL,
+    value double precision NOT NULL
+  );
+  SELECT create_hypertable('upgrade_metrics', 'observed_at');
+  INSERT INTO upgrade_metrics VALUES
+    ('2026-01-01 00:00:00+00', 'sensor-a', 1.5),
+    ('2026-01-01 00:01:00+00', 'sensor-a', 2.5);
+
+  CREATE TABLE upgrade_vectors (
+    id integer PRIMARY KEY,
+    embedding vector(3) NOT NULL
+  );
+  INSERT INTO upgrade_vectors VALUES
+    (1, '[1,0,0]'),
+    (2, '[0,1,0]'),
+    (3, '[0,0,1]');
+  CREATE INDEX upgrade_vectors_diskann
+    ON upgrade_vectors USING diskann (embedding vector_cosine_ops);
+
+  CREATE TABLE upgrade_places (
+    id integer PRIMARY KEY,
+    geom geometry(Point, 4326) NOT NULL
+  );
+  INSERT INTO upgrade_places VALUES
+    (1, ST_SetSRID(ST_MakePoint(55.2708, 25.2048), 4326));
+
   LOAD 'age';
   SET search_path = ag_catalog, \"\$user\", public;
   SELECT create_graph('upgrade_parity');
@@ -97,6 +127,15 @@ docker exec "${NEW_CONTAINER}" psql -h localhost -U postgres -d postgres -v ON_E
     FROM pg_available_extensions
    WHERE name IN ('vector','vectorscale','postgis','timescaledb','age')
      AND installed_version IS DISTINCT FROM default_version;
+  SELECT count(*) AS metric_rows FROM upgrade_metrics;
+  SELECT count(*) AS hypertables
+    FROM timescaledb_information.hypertables
+   WHERE hypertable_name = 'upgrade_metrics';
+  SELECT id AS nearest_vector
+    FROM upgrade_vectors
+   ORDER BY embedding <=> '[1,0,0]'
+   LIMIT 1;
+  SELECT ST_AsText(geom) AS place FROM upgrade_places WHERE id = 1;
 "
 
 nodes="$(docker exec "${NEW_CONTAINER}" psql -qAt -h localhost -U postgres -d postgres \
@@ -109,10 +148,35 @@ nodes="$(docker exec "${NEW_CONTAINER}" psql -qAt -h localhost -U postgres -d po
   ")"
 test "${nodes}" = "1"
 
+metric_rows="$(docker exec "${NEW_CONTAINER}" psql -qAt -h localhost -U postgres -d postgres \
+  -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM upgrade_metrics")"
+test "${metric_rows}" = "2"
+
+hypertables="$(docker exec "${NEW_CONTAINER}" psql -qAt -h localhost -U postgres -d postgres \
+  -v ON_ERROR_STOP=1 -c "
+    SELECT count(*)
+      FROM timescaledb_information.hypertables
+     WHERE hypertable_name = 'upgrade_metrics'
+  ")"
+test "${hypertables}" = "1"
+
+nearest_vector="$(docker exec "${NEW_CONTAINER}" psql -qAt -h localhost -U postgres -d postgres \
+  -v ON_ERROR_STOP=1 -c "
+    SELECT id
+      FROM upgrade_vectors
+     ORDER BY embedding <=> '[1,0,0]'
+     LIMIT 1
+  ")"
+test "${nearest_vector}" = "1"
+
+place="$(docker exec "${NEW_CONTAINER}" psql -qAt -h localhost -U postgres -d postgres \
+  -v ON_ERROR_STOP=1 -c "SELECT ST_AsText(geom) FROM upgrade_places WHERE id = 1")"
+test "${place}" = "POINT(55.2708 25.2048)"
+
 mismatches="$(docker exec "${NEW_CONTAINER}" psql -h localhost -U postgres -d postgres -At -c \
   "SELECT count(*) FROM pg_available_extensions
     WHERE name IN ('vector','vectorscale','postgis','timescaledb','age')
       AND installed_version IS DISTINCT FROM default_version")"
 test "${mismatches}" = "0"
 
-echo "OK: persistent database upgraded cleanly and AGE graph data survived."
+echo "OK: persistent database upgraded cleanly and all extension data survived."

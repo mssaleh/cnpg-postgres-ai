@@ -24,7 +24,7 @@
 #     SQL ABIs underneath persistent databases.
 #   - To test a different extension release, pass build args and update the
 #     pins below in the publishing commit once upgrade parity passes:
-#       --build-arg TIMESCALEDB_VERSION=2.28.2
+#       --build-arg TIMESCALEDB_VERSION=2.29.0
 #       --build-arg PGVECTORSCALE_VERSION=0.9.0
 #       --build-arg PGVECTOR_VERSION=0.8.5
 #       --build-arg POSTGIS_VERSION=3.6.4
@@ -81,7 +81,7 @@ ARG AGE_VERSION
 RUN apt-get update \
  && PGVECTOR_VERSION="${PGVECTOR_VERSION:-0.8.5}" \
  && POSTGIS_VERSION="${POSTGIS_VERSION:-3.6.4}" \
- && TIMESCALEDB_VERSION="${TIMESCALEDB_VERSION:-2.28.2}" \
+ && TIMESCALEDB_VERSION="${TIMESCALEDB_VERSION:-2.29.0}" \
  && AGE_VERSION="${AGE_VERSION:-1.8.0}" \
  && PGVECTOR_PKG="postgresql-18-pgvector${PGVECTOR_VERSION:+=${PGVECTOR_VERSION}*}" \
  && POSTGIS_PKG="postgresql-18-postgis-3${POSTGIS_VERSION:+=${POSTGIS_VERSION}*}" \
