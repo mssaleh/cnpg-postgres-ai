@@ -19,8 +19,12 @@ Suitable for: AI-agent platforms (long-term memory backed by pgvector + DiskANN)
 Published to GHCR on every build:
 
 - `ghcr.io/mssaleh/cnpg-postgres-ai:<tag>` — public
+- `<harbor-registry>/<project>/cnpg-postgres-ai:<tag>` — optional Harbor mirror
 
-An optional Harbor mirror can be enabled in GitHub Actions with repository variables `HARBOR_REGISTRY` and `HARBOR_PROJECT` plus secrets `HARBOR_USERNAME` and `HARBOR_PASSWORD`. The mirror is best effort; GHCR is the required publish target.
+Configure the mirror with GitHub repository variables `HARBOR_REGISTRY` and
+`HARBOR_PROJECT`, plus repository secrets `HARBOR_USERNAME` and
+`HARBOR_PASSWORD`. The registry target is never hardcoded in the repository.
+The mirror is best effort; GHCR is the required publish target.
 
 The first GHCR package created under a personal account is private by default. If CI says the image was pushed but is not anonymously readable, open the package settings and change visibility to Public once.
 
@@ -70,7 +74,7 @@ spec:
 
 - **PostgreSQL** is pinned to MAJOR 18 via the CNPG base image tag.
 - Extension versions are explicit release pins in `Dockerfile`: pgvector 0.8.5,
-  pgvectorscale 0.9.0, PostGIS 3.6.4, TimescaleDB 2.28.2, and Apache AGE 1.8.0.
+  pgvectorscale 0.9.0, PostGIS 3.6.4, TimescaleDB 2.29.0, and Apache AGE 1.8.0.
 - Weekly CI rebuild (Sun 02:00 UTC) pulls base-image and packaging security updates
   without silently changing extension SQL versions.
 - An extension bump is a reviewed publishing commit. CI snapshots the previous
@@ -83,7 +87,7 @@ To pin a specific patch level (parity testing, regression debugging), use the wo
 gh workflow run build.yml \
   -f pgvector_version=0.8.5 \
   -f postgis_version=3.6.4 \
-  -f timescaledb_version=2.28.2 \
+  -f timescaledb_version=2.29.0 \
   -f pgvectorscale_version=0.9.0 \
   -f age_version=1.8.0
 ```
