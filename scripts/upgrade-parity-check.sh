@@ -105,8 +105,15 @@ start_postgres "${NEW_IMG}" "${NEW_CONTAINER}"
 wait_ready "${NEW_CONTAINER}"
 
 # Extension SQL/catalog state is database-owned and is not upgraded merely by
-# replacing the container image. Update dependencies before dependants, then AGE.
-for extension in timescaledb vector vectorscale postgis age; do
+# replacing the container image. TimescaleDB's loader resolves the installed,
+# versioned library before pg_available_extensions can be queried. Upgrade it
+# unconditionally first so a candidate that no longer ships the old library can
+# load the catalog; PostgreSQL treats an already-current update as a no-op.
+docker exec "${NEW_CONTAINER}" psql -X -h localhost -U postgres -d postgres \
+  -v ON_ERROR_STOP=1 -c "ALTER EXTENSION timescaledb UPDATE"
+
+# Update the remaining dependencies before dependants, then AGE.
+for extension in vector vectorscale postgis age; do
   update_sql="$(docker exec "${NEW_CONTAINER}" psql -h localhost -U postgres -d postgres -At -c \
     "SELECT format('ALTER EXTENSION %I UPDATE TO %L;', name, default_version)
        FROM pg_available_extensions
