@@ -234,8 +234,11 @@ jobs:
       # air-gapped equivalent, generate a long-lived cosign keypair and
       # use `cosign sign --key cosign.key` instead — but keyless is
       # simpler in CI and rotates the cert per build.
+      # Exact tag on purpose: sigstore publishes a floating `v3` tag but never
+      # created one for the v4 line, so `@v4` does not resolve. Bump this when
+      # a newer v4.x ships, or move to `@v4` once upstream publishes that tag.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Sign GHCR image
         env:
