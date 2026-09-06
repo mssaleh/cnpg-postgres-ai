@@ -5,12 +5,12 @@ CloudNativePG-compatible PostgreSQL 18 image with an AI / graph extension bundle
 - **pgvector** — vector data type + HNSW/IVF indexes
 - **pgvectorscale** — DiskANN-backed vector index (Timescale)
 - **PostGIS** — geospatial
-- **TimescaleDB** — time-series + hypertables (Apache-2.0 OSS variant; no TSL/enterprise)
+- **TimescaleDB** — time-series + hypertables (Community Edition, Timescale License)
 - **Apache AGE** — graph database extension with openCypher queries on PostgreSQL
 
 ## Why this image
 
-CloudNativePG (CNPG) drives Postgres lifecycle as UID 26 and replaces Patroni / Spilo with its own integrated backup + failover. Standard distro `postgres:N` images and the upstream `timescale/timescaledb-ha:pgN-tsM-oss` image don't fit cleanly — this image starts from `ghcr.io/cloudnative-pg/postgresql:18-system-trixie` (CNPG's official baseline) and layers the five extensions on top.
+CloudNativePG (CNPG) drives Postgres lifecycle as UID 26 and replaces Patroni / Spilo with its own integrated backup + failover. Standard distro `postgres:N` images and the upstream `timescale/timescaledb-ha:pgN-tsM` image don't fit cleanly — this image starts from `ghcr.io/cloudnative-pg/postgresql:18-system-trixie` (CNPG's official baseline) and layers the five extensions on top.
 
 Suitable for: AI-agent platforms (long-term memory backed by pgvector + DiskANN), knowledge-graph workloads (AGE), geospatial + time-series (PostGIS + TimescaleDB) — typically all five together in modern data products.
 
@@ -72,16 +72,30 @@ spec:
 
 ## Version policy
 
-- **PostgreSQL** is pinned to MAJOR 18 via the CNPG base image tag.
-- Extension versions are explicit release pins in `Dockerfile`: pgvector 0.8.5,
-  pgvectorscale 0.9.0, PostGIS 3.6.4, TimescaleDB 2.29.0, and Apache AGE 1.8.0.
-- Weekly CI rebuild (Sun 02:00 UTC) pulls base-image and packaging security updates
-  without silently changing extension SQL versions.
-- An extension bump is a reviewed publishing commit. CI snapshots the previous
-  `18-latest`, creates real extension/graph data, restarts that persistent database
-  on the candidate image, runs the supported upgrades, and verifies the graph.
+Nothing is pinned to an exact patch, a digest, or a commit SHA. Each dependency is
+declared as a minimum with no upper bound, so every build resolves the newest stable
+release available at that moment.
 
-To pin a specific patch level (parity testing, regression debugging), use the workflow_dispatch inputs:
+- **PostgreSQL** is held at MAJOR 18 by the `ghcr.io/cloudnative-pg/postgresql:18-system-trixie`
+  base tag. The tag floats within the major, so a rebuild picks up the newest 18.x.
+- **Extensions** carry a `*_MIN_VERSION` build arg in `Dockerfile`: pgvector 0.8.6,
+  pgvectorscale 0.9.1, PostGIS 3.6.4, TimescaleDB 2.29.2, Apache AGE 1.8.0~rc0.
+  apt (PGDG, Timescale) and the pgvectorscale GitHub release feed pick the newest
+  release; the build fails if resolution lands below the declared minimum.
+  Raise a minimum when an upgrade becomes mandatory — a security fix, or an
+  extension SQL version the image must never fall back below.
+- **TimescaleDB** is installed from `timescaledb-2-postgresql-18`, which carries
+  every historical `timescaledb` shared library rather than only the newest. It
+  costs ~300 MB of image and buys the guarantee below: a persistent database on
+  any older extension version can still start, which is what lets you run
+  `ALTER EXTENSION timescaledb UPDATE` after the image swap.
+- The weekly CI rebuild (Sun 02:00 UTC) is how the image reaches each new release.
+  Every rebuild is gated on both parity checks below, so an upstream release that
+  breaks a persistent database is caught before `18-latest` moves.
+
+To pin exact releases instead (parity testing, regression bisection), use the
+workflow_dispatch inputs. A pinned version is installed as asked and is not
+floor-checked:
 
 ```
 gh workflow run build.yml \

@@ -11,26 +11,27 @@ on:
   workflow_dispatch:
     inputs:
       pgvector_version:
-        description: "Override pgvector version (blank = Dockerfile release pin)"
+        description: "Pin pgvector to one exact release (blank = newest stable at build time)"
         required: false
         default: ""
       postgis_version:
-        description: "Override PostGIS version (blank = Dockerfile release pin)"
+        description: "Pin PostGIS to one exact release (blank = newest stable at build time)"
         required: false
         default: ""
       timescaledb_version:
-        description: "Override TimescaleDB version (blank = Dockerfile release pin)"
+        description: "Pin TimescaleDB to one exact release (blank = newest stable at build time)"
         required: false
         default: ""
       pgvectorscale_version:
-        description: "Override pgvectorscale tag (blank = Dockerfile release pin)"
+        description: "Pin pgvectorscale to one exact release tag (blank = newest stable at build time)"
         required: false
         default: ""
       age_version:
-        description: "Override Apache AGE version (blank = Dockerfile release pin)"
+        description: "Pin Apache AGE to one exact release (blank = newest stable at build time)"
         required: false
         default: ""
-  # Weekly rebuild for security patches in the base image + extensions.
+  # Weekly rebuild: picks up base-image, distro, and extension releases.
+  # With nothing pinned, this is how the image reaches each new stable release.
   # Sunday 02:00 UTC = early Monday in Asia/Dubai (low-traffic window).
   schedule:
     - cron: "0 2 * * 0"
@@ -38,7 +39,7 @@ on:
 permissions:
   contents: read
   packages: write
-  id-token: write   # for cosign keyless signing (future)
+  id-token: write   # OIDC token for cosign keyless signing
 
 env:
   GHCR_REGISTRY: ghcr.io
@@ -48,7 +49,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -164,7 +165,8 @@ jobs:
             index,manifest:org.opencontainers.image.description=CloudNativePG-compatible Postgres 18 with pgvector, pgvectorscale, PostGIS, TimescaleDB, and Apache AGE.
             index,manifest:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             index,manifest:org.opencontainers.image.licenses=Apache-2.0
-          # Blank overrides resolve to the explicit release pins in Dockerfile.
+          # Blank inputs leave each extension floating: the build resolves the
+          # newest stable release and fails below the Dockerfile's declared minimum.
           build-args: |
             CACHE_BUST=${{ github.run_id }}
             PGVECTOR_VERSION=${{ inputs.pgvector_version }}
@@ -233,7 +235,7 @@ jobs:
       # use `cosign sign --key cosign.key` instead — but keyless is
       # simpler in CI and rotates the cert per build.
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@v4
 
       - name: Sign GHCR image
         env:
