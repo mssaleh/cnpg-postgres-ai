@@ -99,29 +99,50 @@ ARG POSTGIS_VERSION
 ARG TIMESCALEDB_VERSION
 ARG AGE_VERSION
 
+# Hold TimescaleDB at one minor line (for example 2.27) for an application that
+# qualifies a line rather than the newest release. The newest release of that
+# line is installed from the same all-libraries package and floor-checked
+# against the line's first release.
+ARG TIMESCALEDB_LINE
+
 RUN . /etc/os-release \
  && apt-get update \
  && pgvector_pkg="postgresql-18-pgvector${PGVECTOR_VERSION:+=${PGVECTOR_VERSION}*}" \
  && postgis_pkg="postgresql-18-postgis-3${POSTGIS_VERSION:+=${POSTGIS_VERSION}*}" \
  && age_pkg="postgresql-18-age${AGE_VERSION:+=${AGE_VERSION}~rc0*}" \
+ && timescaledb_min="${TIMESCALEDB_MIN_VERSION}" \
  && if [ -n "${TIMESCALEDB_VERSION:-}" ]; then \
       timescaledb_pkg="timescaledb-2-${TIMESCALEDB_VERSION}-postgresql-18"; \
+      timescaledb_spec="${timescaledb_pkg}"; \
       loader_pkg="timescaledb-2-loader-postgresql-18=${TIMESCALEDB_VERSION}~debian${VERSION_ID}*"; \
+    elif [ -n "${TIMESCALEDB_LINE:-}" ]; then \
+      timescaledb_pkg="timescaledb-2-postgresql-18"; \
+      timescaledb_spec="${timescaledb_pkg}=${TIMESCALEDB_LINE}.*"; \
+      loader_pkg="timescaledb-2-loader-postgresql-18=${TIMESCALEDB_LINE}.*"; \
+      timescaledb_min="${TIMESCALEDB_LINE}.0"; \
     else \
       timescaledb_pkg="timescaledb-2-postgresql-18"; \
+      timescaledb_spec="${timescaledb_pkg}"; \
       loader_pkg="timescaledb-2-loader-postgresql-18"; \
     fi \
  && apt-get install -y --no-install-recommends --allow-downgrades \
       "${pgvector_pkg}" \
       "${postgis_pkg}" \
       "${age_pkg}" \
-      "${timescaledb_pkg}" \
+      "${timescaledb_spec}" \
       "${loader_pkg}" \
+ && if [ -n "${TIMESCALEDB_LINE:-}" ]; then \
+      installed="$(dpkg-query -s "${timescaledb_pkg}" | sed -n 's/^Version: //p')"; \
+      case "${installed}" in \
+        "${TIMESCALEDB_LINE}".*) ;; \
+        *) echo "ERROR: ${timescaledb_pkg} resolved to ${installed}, outside line ${TIMESCALEDB_LINE}" >&2; exit 1 ;; \
+      esac; \
+    fi \
  && for spec in \
       "postgresql-18-pgvector ${PGVECTOR_MIN_VERSION} ${PGVECTOR_VERSION:-}" \
       "postgresql-18-postgis-3 ${POSTGIS_MIN_VERSION} ${POSTGIS_VERSION:-}" \
       "postgresql-18-age ${AGE_MIN_VERSION} ${AGE_VERSION:-}" \
-      "${timescaledb_pkg} ${TIMESCALEDB_MIN_VERSION} ${TIMESCALEDB_VERSION:-}" ; do \
+      "${timescaledb_pkg} ${timescaledb_min} ${TIMESCALEDB_VERSION:-}" ; do \
       set -- ${spec}; \
       installed="$(dpkg-query -s "$1" | sed -n 's/^Version: //p')"; \
       if [ -n "${3:-}" ]; then \

@@ -93,6 +93,15 @@ release available at that moment.
   Every rebuild is gated on both parity checks below, so an upstream release that
   breaks a persistent database is caught before `18-latest` moves.
 
+An application that qualifies one TimescaleDB minor line rather than the newest
+release builds with `TIMESCALEDB_LINE`. The newest release of that line is
+installed from the same all-libraries package and floor-checked against the
+line's first release; the other extensions still float:
+
+```
+docker build --build-arg TIMESCALEDB_LINE=2.27 -t <registry>/cnpg-postgres-ai:18-ts2.27 .
+```
+
 To pin exact releases instead (parity testing, regression bisection), use the
 workflow_dispatch inputs. A pinned version is installed as asked and is not
 floor-checked:
