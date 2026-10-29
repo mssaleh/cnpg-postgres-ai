@@ -104,17 +104,13 @@ docker rm "${OLD_CONTAINER}" >/dev/null
 start_postgres "${NEW_IMG}" "${NEW_CONTAINER}"
 wait_ready "${NEW_CONTAINER}"
 
-# Extension SQL/catalog state is database-owned and is not upgraded merely by
-# replacing the container image. TimescaleDB's loader resolves the installed,
-# versioned library before pg_available_extensions can be queried. Upgrade it
-# unconditionally first so a candidate that no longer ships the old library can
-# load the catalog; PostgreSQL treats an already-current update as a no-op.
+# Update TimescaleDB in a fresh session before querying extension metadata.
 docker exec "${NEW_CONTAINER}" psql -X -h localhost -U postgres -d postgres \
   -v ON_ERROR_STOP=1 -c "ALTER EXTENSION timescaledb UPDATE"
 
 # Update the remaining dependencies before dependants, then AGE.
 for extension in vector vectorscale postgis age; do
-  update_sql="$(docker exec "${NEW_CONTAINER}" psql -h localhost -U postgres -d postgres -At -c \
+  update_sql="$(docker exec "${NEW_CONTAINER}" psql -X -h localhost -U postgres -d postgres -At -v ON_ERROR_STOP=1 -c \
     "SELECT format('ALTER EXTENSION %I UPDATE TO %L;', name, default_version)
        FROM pg_available_extensions
       WHERE name='${extension}' AND installed_version IS DISTINCT FROM default_version")"
@@ -169,6 +165,7 @@ test "${hypertables}" = "1"
 
 nearest_vector="$(docker exec "${NEW_CONTAINER}" psql -qAt -h localhost -U postgres -d postgres \
   -v ON_ERROR_STOP=1 -c "
+    SET enable_seqscan = off;
     SELECT id
       FROM upgrade_vectors
      ORDER BY embedding <=> '[1,0,0]'
@@ -176,11 +173,22 @@ nearest_vector="$(docker exec "${NEW_CONTAINER}" psql -qAt -h localhost -U postg
   ")"
 test "${nearest_vector}" = "1"
 
+# Execute the persisted index and inspect the plan, rather than a sequential scan.
+index_plan="$(docker exec "${NEW_CONTAINER}" psql -XqAt -h localhost -U postgres -d postgres \
+  -v ON_ERROR_STOP=1 -c "
+    SET enable_seqscan = off;
+    EXPLAIN (ANALYZE, FORMAT JSON)
+    SELECT id FROM upgrade_vectors ORDER BY embedding <=> '[1,0,0]' LIMIT 1;
+  ")"
+printf '%s\n' "${index_plan}"
+jq -e '[.. | objects | select(.["Index Name"]? == "upgrade_vectors_diskann"
+  and .["Actual Loops"] > 0)] | length > 0' <<< "${index_plan}" >/dev/null
+
 place="$(docker exec "${NEW_CONTAINER}" psql -qAt -h localhost -U postgres -d postgres \
   -v ON_ERROR_STOP=1 -c "SELECT ST_AsText(geom) FROM upgrade_places WHERE id = 1")"
 test "${place}" = "POINT(55.2708 25.2048)"
 
-mismatches="$(docker exec "${NEW_CONTAINER}" psql -h localhost -U postgres -d postgres -At -c \
+mismatches="$(docker exec "${NEW_CONTAINER}" psql -X -h localhost -U postgres -d postgres -At -v ON_ERROR_STOP=1 -c \
   "SELECT count(*) FROM pg_available_extensions
     WHERE name IN ('vector','vectorscale','postgis','timescaledb','age')
       AND installed_version IS DISTINCT FROM default_version")"

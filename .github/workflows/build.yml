@@ -11,41 +11,52 @@ on:
   workflow_dispatch:
     inputs:
       pgvector_version:
-        description: "Pin pgvector to one exact release (blank = newest stable at build time)"
+        description: "Exact pgvector release (blank = newest stable)"
         required: false
         default: ""
       postgis_version:
-        description: "Pin PostGIS to one exact release (blank = newest stable at build time)"
+        description: "Exact PostGIS release (blank = newest stable)"
         required: false
         default: ""
       timescaledb_version:
-        description: "Pin TimescaleDB to one exact release (blank = newest stable at build time)"
+        description: "Exact TimescaleDB release (blank = newest stable)"
+        required: false
+        default: ""
+      timescaledb_line:
+        description: "TimescaleDB minor line, e.g. 2.31 (blank = newest stable)"
         required: false
         default: ""
       pgvectorscale_version:
-        description: "Pin pgvectorscale to one exact release tag (blank = newest stable at build time)"
+        description: "Exact pgvectorscale release tag (blank = newest stable)"
         required: false
         default: ""
       age_version:
-        description: "Pin Apache AGE to one exact release (blank = newest stable at build time)"
+        description: "Exact Apache AGE release (blank = newest available PG18 package)"
         required: false
         default: ""
-  # Weekly rebuild: picks up base-image, distro, and extension releases.
-  # With nothing pinned, this is how the image reaches each new stable release.
-  # Sunday 02:00 UTC = early Monday in Asia/Dubai (low-traffic window).
+      upgrade_from_image:
+        description: "Upgrade baseline image (blank = previous 18-latest)"
+        required: false
+        default: ""
+  # Sunday 02:00 UTC = Sunday 06:00 Asia/Dubai.
   schedule:
     - cron: "0 2 * * 0"
+
+# Serialize promotions so an older run cannot replace a newer release.
+concurrency:
+  group: build-${{ github.repository }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
   packages: write
-  id-token: write   # OIDC token for cosign keyless signing
+  id-token: write
 
 env:
   GHCR_REGISTRY: ghcr.io
   HARBOR_REGISTRY: ${{ vars.HARBOR_REGISTRY }}
   HARBOR_PROJECT: ${{ vars.HARBOR_PROJECT }}
-  IMAGE_NAME: ${{ github.repository }}     # e.g. mssaleh/cnpg-postgres-ai
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
@@ -53,22 +64,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-
       - uses: docker/setup-buildx-action@v4
 
-      - name: Local CI preflight
-        run: ./scripts/local-ci.sh "cnpg-postgres-ai:ci-${{ github.run_id }}"
-        env:
-          CACHE_BUST: ${{ github.run_id }}
-          # Snapshotted before this run publishes, so this is the prior release.
-          UPGRADE_FROM_IMAGE: ghcr.io/${{ github.repository }}:18-latest
-          PGVECTOR_VERSION: ${{ inputs.pgvector_version }}
-          POSTGIS_VERSION: ${{ inputs.postgis_version }}
-          TIMESCALEDB_VERSION: ${{ inputs.timescaledb_version }}
-          PGVECTORSCALE_VERSION: ${{ inputs.pgvectorscale_version }}
-          AGE_VERSION: ${{ inputs.age_version }}
+      - name: Check sources
+        run: ./scripts/local-ci.sh --check
 
-      # GHCR — uses the built-in GITHUB_TOKEN.
       - name: Login to GHCR
         uses: docker/login-action@v4
         with:
@@ -76,102 +76,57 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: harbor
-        name: Login to Harbor (best effort)
-        run: |
-          set +e
-          if [ -z "${HARBOR_REGISTRY}" ] || [ -z "${HARBOR_USERNAME}" ] || [ -z "${HARBOR_PASSWORD}" ]; then
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Harbor registry or credentials are not configured; skipping Harbor mirror"
-            exit 0
-          fi
-
-          echo "${HARBOR_PASSWORD}" | timeout 30 docker login "${HARBOR_REGISTRY}" \
-            --username "${HARBOR_USERNAME}" --password-stdin
-          status=$?
-          if [ "${status}" -eq 0 ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Harbor unavailable or login failed with status ${status}; GHCR publish will continue"
-          fi
-        env:
-          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
-          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
-
-      # Compute tags:
-      #   - 18-latest          : floating, always newest weekly build
-      #   - 18-YYYY-MM-DD-<sha>: immutable, for production CNPG Cluster CRs
-      # GHCR is the required public publish target. Harbor tags are computed
-      # separately and mirrored only when Harbor is reachable.
       - id: meta
+        name: Resolve image references
+        env:
+          OWNER_TYPE: ${{ github.event.repository.owner.type }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
-          DATE=$(date -u +'%Y-%m-%d')
-          SHA=$(git rev-parse --short HEAD)
-          # Extract just the image base name (drop the org prefix)
-          IMG_BASE=$(echo "${IMAGE_NAME}" | awk -F/ '{print $NF}')
-          HARBOR_PROJECT="${HARBOR_PROJECT:-library}"
-
-          if [ "${{ github.event.repository.owner.type }}" = "Organization" ]; then
-            PACKAGE_URL="https://github.com/orgs/${{ github.repository_owner }}/packages/container/package/${IMG_BASE}"
+          set -euo pipefail
+          date=$(date -u +'%Y-%m-%d')
+          sha=$(git rev-parse --short HEAD)
+          image="${GHCR_REGISTRY}/${IMAGE_NAME}"
+          image_base="${IMAGE_NAME##*/}"
+          release="18-${date}-${sha}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [ "${OWNER_TYPE}" = "Organization" ]; then
+            package_url="https://github.com/orgs/${REPOSITORY_OWNER}/packages/container/package/${image_base}"
           else
-            PACKAGE_URL="https://github.com/users/${{ github.repository_owner }}/packages/container/package/${IMG_BASE}"
+            package_url="https://github.com/users/${REPOSITORY_OWNER}/packages/container/package/${image_base}"
           fi
-
           {
-            echo "ghcr_tags<<EOF"
-            echo "${GHCR_REGISTRY}/${IMAGE_NAME}:18-latest"
-            echo "${GHCR_REGISTRY}/${IMAGE_NAME}:18-${DATE}-${SHA}"
-            echo "EOF"
-            echo "harbor_tags<<EOF"
+            echo "image=${image}"
+            echo "candidate=${image}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "immutable=${image}:${release}"
+            echo "latest=${image}:18-latest"
+            echo "package_url=${package_url}"
             if [ -n "${HARBOR_REGISTRY}" ]; then
-              echo "${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-latest"
-              echo "${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-${DATE}-${SHA}"
+              mirror="${HARBOR_REGISTRY}/${HARBOR_PROJECT:-library}/${image_base}"
+              echo "harbor_immutable=${mirror}:${release}"
+              echo "harbor_latest=${mirror}:18-latest"
             fi
-            echo "EOF"
           } >> "$GITHUB_OUTPUT"
-          echo "date=${DATE}" >> "$GITHUB_OUTPUT"
-          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "img_base=${IMG_BASE}" >> "$GITHUB_OUTPUT"
-          echo "ghcr_image=${GHCR_REGISTRY}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
-          echo "harbor_project=${HARBOR_PROJECT}" >> "$GITHUB_OUTPUT"
-          echo "package_url=${PACKAGE_URL}" >> "$GITHUB_OUTPUT"
-          echo "package_settings_url=${PACKAGE_URL}/settings" >> "$GITHUB_OUTPUT"
-          if [ -n "${HARBOR_REGISTRY}" ]; then
-            echo "harbor_latest=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-latest" >> "$GITHUB_OUTPUT"
-            echo "harbor_immutable=${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMG_BASE}:18-${DATE}-${SHA}" >> "$GITHUB_OUTPUT"
-          else
-            echo "harbor_latest=" >> "$GITHUB_OUTPUT"
-            echo "harbor_immutable=" >> "$GITHUB_OUTPUT"
-          fi
 
-      - id: build_ghcr
-        name: Build and push image to GHCR
+      - id: candidate
+        name: Build and push candidate
         uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           pull: true
-          # amd64 only for now . Add arm64 to the platforms list if/when we run on ARM hardware.
           platforms: linux/amd64
-          tags: ${{ steps.meta.outputs.ghcr_tags }}
+          tags: ${{ steps.meta.outputs.candidate }}
           labels: |
-            org.opencontainers.image.title=cnpg-postgres-ai
-            org.opencontainers.image.description=CloudNativePG-compatible Postgres 18 with pgvector, pgvectorscale, PostGIS, TimescaleDB, and Apache AGE.
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.licenses=Apache-2.0
-            org.opencontainers.image.vendor=${{ github.repository_owner }}
+            org.opencontainers.image.revision=${{ github.sha }}
           annotations: |
             index,manifest:org.opencontainers.image.description=CloudNativePG-compatible Postgres 18 with pgvector, pgvectorscale, PostGIS, TimescaleDB, and Apache AGE.
             index,manifest:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             index,manifest:org.opencontainers.image.licenses=Apache-2.0
-          # Blank inputs leave each extension floating: the build resolves the
-          # newest stable release and fails below the Dockerfile's declared minimum.
           build-args: |
-            CACHE_BUST=${{ github.run_id }}
+            CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
             PGVECTOR_VERSION=${{ inputs.pgvector_version }}
             POSTGIS_VERSION=${{ inputs.postgis_version }}
             TIMESCALEDB_VERSION=${{ inputs.timescaledb_version }}
+            TIMESCALEDB_LINE=${{ inputs.timescaledb_line }}
             PGVECTORSCALE_VERSION=${{ inputs.pgvectorscale_version }}
             AGE_VERSION=${{ inputs.age_version }}
           provenance: true
@@ -179,134 +134,132 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Verify GHCR public visibility
+      - name: Verify candidate
+        run: ./scripts/local-ci.sh --verify-only "${IMAGE}@${DIGEST}"
         env:
-          IMAGE: ${{ steps.meta.outputs.ghcr_image }}:18-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.sha }}
-          PACKAGE_URL: ${{ steps.meta.outputs.package_url }}
-          PACKAGE_SETTINGS_URL: ${{ steps.meta.outputs.package_settings_url }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.candidate.outputs.digest }}
+          UPGRADE_FROM_IMAGE: ${{ inputs.upgrade_from_image || format('ghcr.io/{0}:18-latest', github.repository) }}
+
+      - name: Report resolved packages
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}@${{ steps.candidate.outputs.digest }}
         run: |
           set -euo pipefail
-          tmp_config="$(mktemp -d)"
+          {
+            echo '## Candidate versions'
+            echo '```'
+            docker run --rm --entrypoint bash "${IMAGE}" -c '
+              set -euo pipefail
+              postgres --version
+              dpkg-query -W postgresql-18-pgvector pgvectorscale-postgresql-18 \
+                postgresql-18-postgis-3 timescaledb-2-postgresql-18 \
+                timescaledb-2-loader-postgresql-18 postgresql-18-age
+            '
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify anonymous GHCR access
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}@${{ steps.candidate.outputs.digest }}
+          PACKAGE_URL: ${{ steps.meta.outputs.package_url }}
+        run: |
+          set -euo pipefail
+          tmp_config=$(mktemp -d)
           trap 'rm -rf "${tmp_config}"' EXIT
-
-          if DOCKER_CONFIG="${tmp_config}" docker buildx imagetools inspect "${IMAGE}" >/dev/null; then
-            echo "GHCR image is publicly readable: ${IMAGE}"
-            exit 0
-          fi
-
-          cat >&2 <<EOF
-          ERROR: ${IMAGE} was pushed to GHCR but is not anonymously readable.
-
-          For this public repository, make the package public once:
-            ${PACKAGE_SETTINGS_URL}
-
-          GitHub path:
-            Package page -> Package settings -> Danger Zone -> Change visibility -> Public
-
-          Package page:
-            ${PACKAGE_URL}
-          EOF
-          exit 1
-
-      - id: mirror_harbor
-        name: Mirror image to Harbor (best effort)
-        if: steps.harbor.outputs.available == 'true'
-        continue-on-error: true
-        env:
-          DIGEST: ${{ steps.build_ghcr.outputs.digest }}
-          GHCR_IMAGE: ${{ steps.meta.outputs.ghcr_image }}
-          HARBOR_LATEST: ${{ steps.meta.outputs.harbor_latest }}
-          HARBOR_IMMUTABLE: ${{ steps.meta.outputs.harbor_immutable }}
-        run: |
-          set -euxo pipefail
-          docker buildx imagetools create \
-            --tag "${HARBOR_LATEST}" \
-            --tag "${HARBOR_IMMUTABLE}" \
-            "${GHCR_IMAGE}@${DIGEST}"
-
-      # Sigstore keyless signing — uses GitHub's OIDC token to mint a
-      # short-lived certificate from Fulcio (no long-lived keypair). GHCR
-      # signatures are required. Harbor signatures are best-effort, matching
-      # the optional mirror.
-      #
-      # `--yes` accepts the Sigstore transparency-log inclusion prompt
-      # (the public Rekor log records each signature for audit). For an
-      # air-gapped equivalent, generate a long-lived cosign keypair and
-      # use `cosign sign --key cosign.key` instead — but keyless is
-      # simpler in CI and rotates the cert per build.
-      # Exact tag on purpose: sigstore publishes a floating `v3` tag but never
-      # created one for the v4 line, so `@v4` does not resolve. Bump this when
-      # a newer v4.x ships, or move to `@v4` once upstream publishes that tag.
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v4.1.2
-
-      - name: Sign GHCR image
-        env:
-          DIGEST: ${{ steps.build_ghcr.outputs.digest }}
-          TAGS: ${{ steps.meta.outputs.ghcr_tags }}
-          COSIGN_YES: "true"
-        run: |
-          set -euxo pipefail
-          if [ -z "${DIGEST}" ]; then
-            echo "ERROR: build digest not exported by build-push-action" >&2
+          if ! DOCKER_CONFIG="${tmp_config}" docker buildx imagetools inspect "${IMAGE}" >/dev/null; then
+            echo "::error::Candidate is not publicly readable. Check ${PACKAGE_URL}/settings"
             exit 1
           fi
-          while IFS= read -r tag; do
-            [ -z "${tag}" ] && continue
-            echo "Signing ${tag}@${DIGEST}"
-            cosign sign "${tag}@${DIGEST}"
-          done <<< "${TAGS}"
 
-      - id: sign_harbor
-        name: Sign Harbor image (best effort)
-        if: steps.mirror_harbor.outcome == 'success'
-        continue-on-error: true
+      - id: cosign
+        name: Resolve stable Cosign release
         env:
-          DIGEST: ${{ steps.build_ghcr.outputs.digest }}
-          TAGS: ${{ steps.meta.outputs.harbor_tags }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release=$(gh api repos/sigstore/cosign/releases/latest \
+            --jq 'select(.draft == false and .prerelease == false) | .tag_name')
+          [[ "${release}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
+
+      # Upstream has no floating v4 tag. Keep the published stable installer;
+      # resolve the Cosign binary independently of its embedded default.
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: ${{ steps.cosign.outputs.release }}
+
+      - name: Sign and verify candidate
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}@${{ steps.candidate.outputs.digest }}
+          CERTIFICATE_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
           COSIGN_YES: "true"
         run: |
-          set -euxo pipefail
-          while IFS= read -r tag; do
-            [ -z "${tag}" ] && continue
-            echo "Signing ${tag}@${DIGEST}"
-            cosign sign "${tag}@${DIGEST}"
-          done <<< "${TAGS}"
+          set -euo pipefail
+          cosign version
+          cosign sign "${IMAGE}"
+          cosign verify "${IMAGE}" \
+            --certificate-identity "${CERTIFICATE_IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
-      # Parity smoke test: bootstrap postgres ourselves (the CNPG image
-      # strips docker-entrypoint.sh because the operator drives lifecycle),
-      # then CREATE EXTENSION all five and print resulting versions. Build
-      # fails if any extension is missing or fails to load. AGE also gets
-      # a basic graph round-trip to verify the cypher() function works.
-      - name: Parity check
-        run: ./scripts/parity-check.sh "${GHCR_REGISTRY}/${IMAGE_NAME}:18-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.sha }}"
+      - name: Promote verified candidate
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}@${{ steps.candidate.outputs.digest }}
+          DIGEST: ${{ steps.candidate.outputs.digest }}
+          IMMUTABLE: ${{ steps.meta.outputs.immutable }}
+          LATEST: ${{ steps.meta.outputs.latest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${IMMUTABLE}" --tag "${LATEST}" "${IMAGE}"
+          for tag in "${IMMUTABLE}" "${LATEST}"; do
+            actual=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${tag}")
+            test "${actual}" = "${DIGEST}"
+          done
+
+      - id: harbor
+        name: Mirror and sign Harbor image (best effort)
+        if: env.HARBOR_REGISTRY != ''
+        continue-on-error: true
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}@${{ steps.candidate.outputs.digest }}
+          DIGEST: ${{ steps.candidate.outputs.digest }}
+          HARBOR_IMMUTABLE: ${{ steps.meta.outputs.harbor_immutable }}
+          HARBOR_LATEST: ${{ steps.meta.outputs.harbor_latest }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+          CERTIFICATE_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          if [ -z "${HARBOR_USERNAME}" ] || [ -z "${HARBOR_PASSWORD}" ]; then
+            echo "::warning::Harbor credentials are not configured"
+            exit 1
+          fi
+          printf '%s' "${HARBOR_PASSWORD}" | timeout 30 docker login "${HARBOR_REGISTRY}" \
+            --username "${HARBOR_USERNAME}" --password-stdin
+          docker buildx imagetools create --tag "${HARBOR_IMMUTABLE}" \
+            --tag "${HARBOR_LATEST}" "${IMAGE}"
+          cosign sign "${HARBOR_IMMUTABLE}@${DIGEST}"
+          cosign verify "${HARBOR_IMMUTABLE}@${DIGEST}" \
+            --certificate-identity "${CERTIFICATE_IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
       - name: Summary
         env:
-          HARBOR_AVAILABLE: ${{ steps.harbor.outputs.available }}
-          HARBOR_MIRROR_OUTCOME: ${{ steps.mirror_harbor.outcome }}
-          HARBOR_SIGN_OUTCOME: ${{ steps.sign_harbor.outcome }}
+          IMMUTABLE: ${{ steps.meta.outputs.immutable }}
+          LATEST: ${{ steps.meta.outputs.latest }}
+          DIGEST: ${{ steps.candidate.outputs.digest }}
+          COSIGN_RELEASE: ${{ steps.cosign.outputs.release }}
+          HARBOR_OUTCOME: ${{ steps.harbor.outcome }}
         run: |
           {
-            echo "## Image published"
-            echo ""
-            echo "**GHCR (public):**"
-            echo "\`\`\`"
-            echo "${GHCR_REGISTRY}/${IMAGE_NAME}:18-latest"
-            echo "${GHCR_REGISTRY}/${IMAGE_NAME}:18-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.sha }}"
-            echo "\`\`\`"
-            echo ""
-            if [ "${HARBOR_AVAILABLE}" = "true" ] && [ "${HARBOR_MIRROR_OUTCOME}" = "success" ]; then
-              echo "**Harbor (internal mirror, best effort):**"
-              echo "\`\`\`"
-              echo "${HARBOR_REGISTRY}/${{ steps.meta.outputs.harbor_project }}/${{ steps.meta.outputs.img_base }}:18-latest"
-              echo "${HARBOR_REGISTRY}/${{ steps.meta.outputs.harbor_project }}/${{ steps.meta.outputs.img_base }}:18-${{ steps.meta.outputs.date }}-${{ steps.meta.outputs.sha }}"
-              echo "\`\`\`"
-              echo "Harbor signature status: ${HARBOR_SIGN_OUTCOME:-skipped}"
-            else
-              echo "**Harbor (internal mirror):** skipped (${HARBOR_MIRROR_OUTCOME:-unavailable})"
-            fi
-            echo ""
-            echo "**Date:** ${{ steps.meta.outputs.date }}"
-            echo "**Git SHA:** ${{ steps.meta.outputs.sha }}"
+            echo '## Image published'
+            echo '```'
+            echo "${IMMUTABLE}"
+            echo "${LATEST}"
+            echo "${DIGEST}"
+            echo '```'
+            echo "Cosign: ${COSIGN_RELEASE}"
+            echo "Harbor mirror and signature: ${HARBOR_OUTCOME}"
           } >> "$GITHUB_STEP_SUMMARY"

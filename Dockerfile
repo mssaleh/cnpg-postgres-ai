@@ -89,7 +89,7 @@ RUN echo "cache-bust=${CACHE_BUST}" >/dev/null \
 # before ALTER EXTENSION timescaledb UPDATE can run. Pinning a *_VERSION picks
 # the single-version package instead and gives up that headroom.
 
-ARG PGVECTOR_MIN_VERSION=0.8.6
+ARG PGVECTOR_MIN_VERSION=0.8.7
 ARG POSTGIS_MIN_VERSION=3.6.4
 ARG TIMESCALEDB_MIN_VERSION=2.29.2
 ARG AGE_MIN_VERSION=1.8.0~rc0
