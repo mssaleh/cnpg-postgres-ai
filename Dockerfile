@@ -20,7 +20,7 @@
 # Versioning policy:
 #   - PostgreSQL MAJOR is held at 18 via the CNPG base image tag. The tag
 #     itself floats, so a rebuild picks up the newest 18.x on Debian trixie.
-#   - Every extension is declared as a minimum version with no upper bound.
+#   - PostgreSQL and every extension have a minimum version with no upper bound.
 #     apt and the pgvectorscale release feed resolve the newest stable
 #     release at build time; the build fails if resolution lands below the
 #     declared minimum. Nothing is pinned to an exact patch or a digest.
@@ -29,10 +29,10 @@
 #   - The *_VERSION build args force one exact release instead, for parity
 #     testing and regression bisection. An explicit request is honoured as
 #     given and is not floor-checked:
-#       --build-arg TIMESCALEDB_VERSION=2.29.0
-#       --build-arg PGVECTORSCALE_VERSION=0.9.0
-#       --build-arg PGVECTOR_VERSION=0.8.5
-#       --build-arg POSTGIS_VERSION=3.6.4
+#       --build-arg TIMESCALEDB_VERSION=2.31.0
+#       --build-arg PGVECTORSCALE_VERSION=0.9.1
+#       --build-arg PGVECTOR_VERSION=0.8.7
+#       --build-arg POSTGIS_VERSION=3.7.0
 #       --build-arg AGE_VERSION=1.8.0
 
 ARG CNPG_BASE_TAG=18-system-trixie
@@ -89,9 +89,10 @@ RUN echo "cache-bust=${CACHE_BUST}" >/dev/null \
 # before ALTER EXTENSION timescaledb UPDATE can run. Pinning a *_VERSION picks
 # the single-version package instead and gives up that headroom.
 
+ARG POSTGRESQL_MIN_VERSION=18.6
 ARG PGVECTOR_MIN_VERSION=0.8.7
-ARG POSTGIS_MIN_VERSION=3.6.4
-ARG TIMESCALEDB_MIN_VERSION=2.29.2
+ARG POSTGIS_MIN_VERSION=3.7.0
+ARG TIMESCALEDB_MIN_VERSION=2.31.0
 ARG AGE_MIN_VERSION=1.8.0~rc0
 
 ARG PGVECTOR_VERSION
@@ -139,6 +140,7 @@ RUN . /etc/os-release \
       esac; \
     fi \
  && for spec in \
+      "postgresql-18 ${POSTGRESQL_MIN_VERSION}" \
       "postgresql-18-pgvector ${PGVECTOR_MIN_VERSION} ${PGVECTOR_VERSION:-}" \
       "postgresql-18-postgis-3 ${POSTGIS_MIN_VERSION} ${POSTGIS_VERSION:-}" \
       "postgresql-18-age ${AGE_MIN_VERSION} ${AGE_VERSION:-}" \

@@ -12,6 +12,10 @@ CloudNativePG-compatible PostgreSQL 18 image with an AI / graph extension bundle
 
 CloudNativePG (CNPG) drives Postgres lifecycle as UID 26 and replaces Patroni / Spilo with its own integrated backup + failover. Standard distro `postgres:N` images and the upstream `timescale/timescaledb-ha:pgN-tsM` image don't fit cleanly — this image starts from `ghcr.io/cloudnative-pg/postgresql:18-system-trixie` (CNPG's official baseline) and layers the five extensions on top.
 
+CNPG deprecates the `system` image flavor. This image retains its bundled Barman
+Cloud binaries; moving to `standard` requires configuring a backup plugin or
+another supported backup solution ([upstream image documentation](https://github.com/cloudnative-pg/postgres-containers#image-types)).
+
 Suitable for: AI-agent platforms (long-term memory backed by pgvector + DiskANN), knowledge-graph workloads (AGE), geospatial + time-series (PostGIS + TimescaleDB) — typically all five together in modern data products.
 
 ## Image Tags
@@ -50,7 +54,7 @@ metadata:
 spec:
   instances: 1
   # Replace with the immutable tag from a successful build's summary.
-  imageName: ghcr.io/mssaleh/cnpg-postgres-ai:18-2026-10-25-9d37879
+  imageName: ghcr.io/mssaleh/cnpg-postgres-ai:18-2026-11-01-8693b7c-41288901922-1
 
   postgresql:
     # TimescaleDB MUST be in shared_preload_libraries (it's a hard requirement).
@@ -80,20 +84,30 @@ spec:
 
 ## Version policy
 
-Runtime extensions have minimum versions with no upper bound. Normal builds use
-the newest available packages and stable pgvectorscale release compatible with
-PostgreSQL 18 and the image architecture.
+PostgreSQL and runtime extensions have minimum versions with no upper bound.
+Normal builds use the newest available packages and stable pgvectorscale release
+compatible with PostgreSQL 18 and the image architecture.
 
 - **PostgreSQL** is held at MAJOR 18 by the `ghcr.io/cloudnative-pg/postgresql:18-system-trixie`
-  base tag. The tag floats within the major, so a rebuild picks up the newest 18.x.
+  base tag, with a `POSTGRESQL_MIN_VERSION` floor of 18.6. The tag floats within
+  the major, so a rebuild picks up the newest 18.x. PostgreSQL 18.6 supports an
+  in-place minor update from earlier 18.x releases without dump/restore; review
+  its [migration notes](https://www.postgresql.org/docs/18/release-18-6.html#RELEASE-18-6-MIGRATION)
+  for configuration and index maintenance that may apply to existing databases.
 - **Extensions** carry a `*_MIN_VERSION` build arg in `Dockerfile`: pgvector 0.8.7,
-  pgvectorscale 0.9.1, PostGIS 3.6.4, TimescaleDB 2.29.2, Apache AGE 1.8.0~rc0.
+  pgvectorscale 0.9.1, PostGIS 3.7.0, TimescaleDB 2.31.0, Apache AGE 1.8.0~rc0.
   apt (PGDG, Timescale) and the pgvectorscale GitHub release feed pick the newest
   release; the build fails if resolution lands below the declared minimum.
   Raise a minimum when an upgrade becomes mandatory — a security fix, or an
   extension SQL version the image must never fall back below.
 - **pgvector 0.8.7** is required because it fixes an IVFFlat index-build buffer
   overflow ([upstream changelog](https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md)).
+- **PostGIS 3.7** supports PostgreSQL 18. Its PGDG package brings GEOS 3.15 or
+  newer, which enables new functions such as `ST_CoverageEdges`. Raster,
+  topology, and SFCGAL remain available as companion extensions. The address
+  standardizer and TIGER geocoder are separate packages and are not bundled
+  ([release notes](https://postgis.net/2026/10/PostGIS-3.7.0/),
+  [coverage function requirements](https://postgis.net/docs/manual-3.7/en/ST_CoverageEdges.html)).
 - **pgvectorscale** falls back to its declared minimum if the latest release API
   is unavailable or the latest release has no matching PostgreSQL 18 asset. The
   build log reports this fallback; a successful build does not imply the newest
@@ -133,23 +147,24 @@ floor-checked:
 
 ```
 gh workflow run build.yml \
-  -f pgvector_version=0.8.5 \
-  -f postgis_version=3.6.4 \
-  -f timescaledb_version=2.29.0 \
-  -f pgvectorscale_version=0.9.0 \
+  -f pgvector_version=0.8.7 \
+  -f postgis_version=3.7.0 \
+  -f timescaledb_version=2.31.0 \
+  -f pgvectorscale_version=0.9.1 \
   -f age_version=1.8.0
 ```
 
 ## Parity check
 
-A parity step runs in CI against the freshly-built image: it initdbs Postgres, sets `shared_preload_libraries='timescaledb,age'`, starts the cluster, and runs `CREATE EXTENSION` for all five plus a basic AGE graph operation. Build fails if any extension is missing or fails to load.
+A parity step runs in CI against the freshly-built image: it initdbs Postgres, sets `shared_preload_libraries='timescaledb,age'`, starts the cluster, and runs `CREATE EXTENSION` for all five plus AGE graph and PostGIS coverage operations. Build fails if any extension is missing or an operation returns an unexpected result.
 
 CI also runs persistent-upgrade parity from the previously published image. This
 guards the production distinction between replacing extension binaries in an image
 and updating each database's installed extension catalog. It checks surviving
-hypertable, graph, spatial, and vector data, and uses an executed query plan to
-verify the persisted DiskANN index. This is a container test; it does not qualify
-CNPG rolling updates or application workloads.
+hypertable, graph, spatial, and vector data, upgrades PostGIS core and topology
+together, and uses an executed query plan to verify the persisted DiskANN index.
+This is a container test; it does not qualify CNPG rolling updates or application
+workloads.
 
 Run the same entry point locally with Docker, Buildx, and jq. Source checks use
 the upstream Actionlint container, including ShellCheck, in both local runs and CI:
@@ -190,9 +205,14 @@ Apply required upgrades in dependency order during the release window:
 ```sql
 ALTER EXTENSION vector UPDATE;
 ALTER EXTENSION vectorscale UPDATE;
-ALTER EXTENSION postgis UPDATE;
+SELECT postgis_extensions_upgrade();
 ALTER EXTENSION age UPDATE;
 ```
+
+The [PostGIS upgrade function](https://postgis.net/docs/manual-3.7/en/PostGIS_Extensions_Upgrade.html)
+updates the core extension and its installed companion extensions together.
+For existing PostGIS databases, review the 3.7 release notes for changed topology
+tolerances and removed functions such as `ST_MemCollect`.
 
 Take a backup first, use the immutable image tag, and run an application-specific
 smoke test before reopening writes. Never assume a successful fresh-install parity

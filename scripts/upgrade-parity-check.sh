@@ -59,6 +59,7 @@ docker exec "${OLD_CONTAINER}" psql -h localhost -U postgres -d postgres -v ON_E
   CREATE EXTENSION vector;
   CREATE EXTENSION vectorscale CASCADE;
   CREATE EXTENSION postgis;
+  CREATE EXTENSION postgis_topology;
   CREATE EXTENSION timescaledb;
   CREATE EXTENSION age;
 
@@ -109,7 +110,7 @@ docker exec "${NEW_CONTAINER}" psql -X -h localhost -U postgres -d postgres \
   -v ON_ERROR_STOP=1 -c "ALTER EXTENSION timescaledb UPDATE"
 
 # Update the remaining dependencies before dependants, then AGE.
-for extension in vector vectorscale postgis age; do
+for extension in vector vectorscale age; do
   update_sql="$(docker exec "${NEW_CONTAINER}" psql -X -h localhost -U postgres -d postgres -At -v ON_ERROR_STOP=1 -c \
     "SELECT format('ALTER EXTENSION %I UPDATE TO %L;', name, default_version)
        FROM pg_available_extensions
@@ -120,6 +121,9 @@ for extension in vector vectorscale postgis age; do
   fi
 done
 
+docker exec "${NEW_CONTAINER}" psql -X -h localhost -U postgres -d postgres \
+  -v ON_ERROR_STOP=1 -c "SELECT postgis_extensions_upgrade()"
+
 docker exec "${NEW_CONTAINER}" psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "
   LOAD 'age';
   SET search_path = ag_catalog, \"\$user\", public;
@@ -128,7 +132,7 @@ docker exec "${NEW_CONTAINER}" psql -h localhost -U postgres -d postgres -v ON_E
   \$\$) AS (nodes agtype);
   SELECT name, default_version, installed_version
     FROM pg_available_extensions
-   WHERE name IN ('vector','vectorscale','postgis','timescaledb','age')
+   WHERE name IN ('vector','vectorscale','postgis','postgis_topology','timescaledb','age')
      AND installed_version IS DISTINCT FROM default_version;
   SELECT count(*) AS metric_rows FROM upgrade_metrics;
   SELECT count(*) AS hypertables
@@ -190,7 +194,7 @@ test "${place}" = "POINT(55.2708 25.2048)"
 
 mismatches="$(docker exec "${NEW_CONTAINER}" psql -X -h localhost -U postgres -d postgres -At -v ON_ERROR_STOP=1 -c \
   "SELECT count(*) FROM pg_available_extensions
-    WHERE name IN ('vector','vectorscale','postgis','timescaledb','age')
+    WHERE name IN ('vector','vectorscale','postgis','postgis_topology','timescaledb','age')
       AND installed_version IS DISTINCT FROM default_version")"
 test "${mismatches}" = "0"
 

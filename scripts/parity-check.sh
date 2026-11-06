@@ -51,6 +51,22 @@ SELECT extname, extversion FROM pg_extension
 WHERE extname IN ('vector', 'vectorscale', 'postgis', 'timescaledb', 'age')
 ORDER BY extname;
 
+SELECT postgis_full_version();
+DO $check$
+BEGIN
+  IF (string_to_array(postgis_lib_version(), '.'))[1:2]::integer[] >= ARRAY[3, 7] THEN
+    IF ST_Equals(
+      ST_CoverageEdges('MULTIPOLYGON(((0 0,1 0,1 1,0 1,0 0)),((1 0,2 0,2 1,1 1,1 0)))'::geometry, 2),
+      'LINESTRING(1 0,1 1)'::geometry
+    ) IS DISTINCT FROM true THEN
+      RAISE EXCEPTION 'PostGIS coverage returned an unexpected shared edge';
+    END IF;
+  ELSE
+    RAISE NOTICE 'PostGIS % predates coverage support; testing an explicit older release', postgis_lib_version();
+  END IF;
+END
+$check$;
+
 SET search_path = ag_catalog, "$user", public;
 SELECT create_graph('parity');
 SELECT * FROM cypher('parity', $$
@@ -68,4 +84,4 @@ $check$;
 SELECT drop_graph('parity', true);
 SQL
 
-echo "OK: all extensions loaded and preloaded AGE returned the expected graph."
+echo "OK: all extensions loaded and spatial and graph parity checks passed."
