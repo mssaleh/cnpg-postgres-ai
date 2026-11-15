@@ -29,7 +29,7 @@
 #   - The *_VERSION build args force one exact release instead, for parity
 #     testing and regression bisection. An explicit request is honoured as
 #     given and is not floor-checked:
-#       --build-arg TIMESCALEDB_VERSION=2.31.0
+#       --build-arg TIMESCALEDB_VERSION=2.32.1
 #       --build-arg PGVECTORSCALE_VERSION=0.9.1
 #       --build-arg PGVECTOR_VERSION=0.8.7
 #       --build-arg POSTGIS_VERSION=3.7.0
@@ -89,10 +89,12 @@ RUN echo "cache-bust=${CACHE_BUST}" >/dev/null \
 # before ALTER EXTENSION timescaledb UPDATE can run. Pinning a *_VERSION picks
 # the single-version package instead and gives up that headroom.
 
-ARG POSTGRESQL_MIN_VERSION=18.6
+ARG POSTGRESQL_MIN_VERSION=18.7
 ARG PGVECTOR_MIN_VERSION=0.8.7
 ARG POSTGIS_MIN_VERSION=3.7.0
-ARG TIMESCALEDB_MIN_VERSION=2.31.0
+# PostgreSQL 18.7 requires TimescaleDB 2.32.1 or newer.
+# https://github.com/timescale/timescaledb/releases/tag/2.32.0
+ARG TIMESCALEDB_MIN_VERSION=2.32.1
 ARG AGE_MIN_VERSION=1.8.0~rc0
 
 ARG PGVECTOR_VERSION

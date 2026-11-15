@@ -89,17 +89,25 @@ Normal builds use the newest available packages and stable pgvectorscale release
 compatible with PostgreSQL 18 and the image architecture.
 
 - **PostgreSQL** is held at MAJOR 18 by the `ghcr.io/cloudnative-pg/postgresql:18-system-trixie`
-  base tag, with a `POSTGRESQL_MIN_VERSION` floor of 18.6. The tag floats within
-  the major, so a rebuild picks up the newest 18.x. PostgreSQL 18.6 supports an
+  base tag, with a `POSTGRESQL_MIN_VERSION` floor of 18.7. The tag floats within
+  the major, so a rebuild picks up the newest 18.x. PostgreSQL 18.7 supports an
   in-place minor update from earlier 18.x releases without dump/restore; review
-  its [migration notes](https://www.postgresql.org/docs/18/release-18-6.html#RELEASE-18-6-MIGRATION)
-  for configuration and index maintenance that may apply to existing databases.
+  its [migration notes](https://www.postgresql.org/docs/release/18.7/)
+  for index maintenance and the requirement to take a new full backup when using
+  incremental backups. Its composite-type security fixes also require rebuilding
+  C extensions, and some extensions require source changes.
 - **Extensions** carry a `*_MIN_VERSION` build arg in `Dockerfile`: pgvector 0.8.7,
-  pgvectorscale 0.9.1, PostGIS 3.7.0, TimescaleDB 2.31.0, Apache AGE 1.8.0~rc0.
+  pgvectorscale 0.9.1, PostGIS 3.7.0, TimescaleDB 2.32.1, Apache AGE 1.8.0~rc0.
   apt (PGDG, Timescale) and the pgvectorscale GitHub release feed pick the newest
   release; the build fails if resolution lands below the declared minimum.
   Raise a minimum when an upgrade becomes mandatory — a security fix, or an
   extension SQL version the image must never fall back below.
+- **TimescaleDB 2.32.1** is required for PostgreSQL 18.7 compatibility by the
+  [upstream release notes](https://github.com/timescale/timescaledb/releases/tag/2.32.0).
+  As of 2026-11-15, the latest stable release and configured Debian package feed
+  provide only 2.32.0. Default builds therefore fail the minimum-version check
+  until a compatible package is published. Fresh-install and persistent-upgrade
+  parity must pass before this combination can be released.
 - **pgvector 0.8.7** is required because it fixes an IVFFlat index-build buffer
   overflow ([upstream changelog](https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md)).
 - **PostGIS 3.7** supports PostgreSQL 18. Its PGDG package brings GEOS 3.15 or
@@ -149,7 +157,7 @@ floor-checked:
 gh workflow run build.yml \
   -f pgvector_version=0.8.7 \
   -f postgis_version=3.7.0 \
-  -f timescaledb_version=2.31.0 \
+  -f timescaledb_version=2.32.1 \
   -f pgvectorscale_version=0.9.1 \
   -f age_version=1.8.0
 ```
@@ -182,6 +190,14 @@ input selects the previous `18-latest`. Repeat for each deployed baseline before
 deploying; a passing previous-release test does not cover unknown older versions.
 
 ## Upgrading a persistent CNPG database
+
+For a database on PostgreSQL 18.6 or earlier, first upgrade its installed
+TimescaleDB extension to 2.32.1 or newer on a PostgreSQL version supported by that
+TimescaleDB release. Restart PostgreSQL to load the updated loader, as required
+by the [TimescaleDB release notes](https://github.com/timescale/timescaledb/releases/tag/2.32.0),
+before moving to PostgreSQL 18.7. This prerequisite needs an intermediate image
+with the older PostgreSQL version; the default build targets PostgreSQL 18.7.
+The persistent-upgrade check must qualify that prepared baseline.
 
 Replacing `spec.imageName` does **not** run extension upgrade SQL. After CNPG has
 rolled all instances onto the new immutable image, update TimescaleDB first in a
