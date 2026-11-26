@@ -288,10 +288,21 @@ jobs:
             echo "::warning::Harbor credentials are not configured"
             exit 1
           fi
-          printf '%s' "${HARBOR_PASSWORD}" | timeout 30 docker login "${HARBOR_REGISTRY}" \
-            --username "${HARBOR_USERNAME}" --password-stdin
+          for attempt in 1 2 3; do
+            if result=$(printf '%s' "${HARBOR_PASSWORD}" | timeout 30 docker login "${HARBOR_REGISTRY}" \
+              --username "${HARBOR_USERNAME}" --password-stdin 2>&1); then
+              printf '%s\n' "${result}"
+              break
+            fi
+            printf '%s\n' "${result}" >&2
+            if [[ "${result}" != *EOF* || "${attempt}" == 3 ]]; then
+              exit 1
+            fi
+            sleep "${attempt}"
+          done
           read -ra immutable <<< "${IMMUTABLE_TAGS}"
-          ./scripts/promote-image.sh "${IMAGE}" "${MIRROR}" "${immutable[@]}"
+          # Harbor's ingress closed the HTTP/2 connection during blob upload.
+          GODEBUG=http2client=0 ./scripts/promote-image.sh "${IMAGE}" "${MIRROR}" "${immutable[@]}"
           cosign sign "${MIRROR}@${DIGEST}"
           cosign verify "${MIRROR}@${DIGEST}" \
             --certificate-identity "${CERTIFICATE_IDENTITY}" \
