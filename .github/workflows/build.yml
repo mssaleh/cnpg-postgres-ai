@@ -282,27 +282,18 @@ jobs:
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
           CERTIFICATE_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
           COSIGN_YES: "true"
+          # Harbor's ingress closed the HTTP/2 connection during blob upload.
+          GODEBUG: http2client=0
         run: |
           set -euo pipefail
           if [ -z "${HARBOR_USERNAME}" ] || [ -z "${HARBOR_PASSWORD}" ]; then
             echo "::warning::Harbor credentials are not configured"
             exit 1
           fi
-          for attempt in 1 2 3; do
-            if result=$(printf '%s' "${HARBOR_PASSWORD}" | timeout 30 docker login "${HARBOR_REGISTRY}" \
-              --username "${HARBOR_USERNAME}" --password-stdin 2>&1); then
-              printf '%s\n' "${result}"
-              break
-            fi
-            printf '%s\n' "${result}" >&2
-            if [[ "${result}" != *EOF* || "${attempt}" == 3 ]]; then
-              exit 1
-            fi
-            sleep "${attempt}"
-          done
+          printf '%s' "${HARBOR_PASSWORD}" | cosign login "${HARBOR_REGISTRY}" \
+            --username "${HARBOR_USERNAME}" --password-stdin --timeout 30s
           read -ra immutable <<< "${IMMUTABLE_TAGS}"
-          # Harbor's ingress closed the HTTP/2 connection during blob upload.
-          GODEBUG=http2client=0 ./scripts/promote-image.sh "${IMAGE}" "${MIRROR}" "${immutable[@]}"
+          ./scripts/promote-image.sh "${IMAGE}" "${MIRROR}" "${immutable[@]}"
           cosign sign "${MIRROR}@${DIGEST}"
           cosign verify "${MIRROR}@${DIGEST}" \
             --certificate-identity "${CERTIFICATE_IDENTITY}" \
