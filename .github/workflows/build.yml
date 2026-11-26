@@ -282,16 +282,14 @@ jobs:
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
           CERTIFICATE_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
           COSIGN_YES: "true"
-          # Harbor's ingress closed the HTTP/2 connection during blob upload.
-          GODEBUG: http2client=0
         run: |
           set -euo pipefail
           if [ -z "${HARBOR_USERNAME}" ] || [ -z "${HARBOR_PASSWORD}" ]; then
             echo "::warning::Harbor credentials are not configured"
             exit 1
           fi
-          printf '%s' "${HARBOR_PASSWORD}" | cosign login "${HARBOR_REGISTRY}" \
-            --username "${HARBOR_USERNAME}" --password-stdin --timeout 30s
+          printf '%s' "${HARBOR_PASSWORD}" | timeout 30 docker login "${HARBOR_REGISTRY}" \
+            --username "${HARBOR_USERNAME}" --password-stdin
           read -ra immutable <<< "${IMMUTABLE_TAGS}"
           ./scripts/promote-image.sh "${IMAGE}" "${MIRROR}" "${immutable[@]}"
           cosign sign "${MIRROR}@${DIGEST}"
