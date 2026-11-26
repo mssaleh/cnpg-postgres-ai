@@ -1,6 +1,7 @@
 # cnpg-postgres-ai
 
-CloudNativePG-compatible PostgreSQL 18 image with an AI / graph extension bundle:
+CloudNativePG-compatible PostgreSQL images with an AI and graph extension bundle.
+The build targets PostgreSQL 18.6, 18.7, and 19.0.
 
 - **pgvector** — vector data type + HNSW/IVF indexes
 - **pgvectorscale** — DiskANN-backed vector index (Timescale)
@@ -10,7 +11,9 @@ CloudNativePG-compatible PostgreSQL 18 image with an AI / graph extension bundle
 
 ## Why this image
 
-CloudNativePG (CNPG) drives Postgres lifecycle as UID 26 and replaces Patroni / Spilo with its own integrated backup + failover. Standard distro `postgres:N` images and the upstream `timescale/timescaledb-ha:pgN-tsM` image don't fit cleanly — this image starts from `ghcr.io/cloudnative-pg/postgresql:18-system-trixie` (CNPG's official baseline) and layers the five extensions on top.
+CloudNativePG (CNPG) manages PostgreSQL as UID 26 and provides its own backup
+and failover. Each build layers five extensions on the official CNPG
+`ghcr.io/cloudnative-pg/postgresql:<version>-system-trixie` image.
 
 CNPG deprecates the `system` image flavor. This image retains its bundled Barman
 Cloud binaries; moving to `standard` requires configuring a backup plugin or
@@ -32,17 +35,24 @@ The mirror is best effort; GHCR is the required publish target.
 
 The first GHCR package created under a personal account is private by default. If CI says the image was pushed but is not anonymously readable, open the package settings and change visibility to Public once.
 
-Tag scheme:
+| Tag | Example | What it selects |
+| --- | --- | --- |
+| Mutable minor | `18.6`, `18.7`, `19.0` | Latest verified build of that PostgreSQL release. Only the base package revisions and extensions can change. |
+| Mutable major | `18`, `19` | Latest verified build of the default release for that major. The defaults are 18.7 and 19.0. |
+| Immutable build | `18.7-20261126-build-45001874321.1` | One build of that release. The suffix contains the UTC build date, GitHub Actions run ID, and attempt. |
+| Candidate | `candidate-18.7-45001874321-1` | Image awaiting verification. Use a release tag to deploy. |
 
-- `18-latest` — floating, always newest weekly build
-- `18-YYYY-MM-DD-<sha>-<run>-<attempt>` — immutable, **use this in production CNPG `Cluster.spec.imageName`**
-- `candidate-<run>-<attempt>` — build artifact awaiting verification; do not deploy
+The legacy `18-latest` tag follows `18`. The 18.7 build also publishes
+`18-YYYY-MM-DD-<sha>-<run>-<attempt>` and `candidate-<run>-<attempt>` in their
+existing formats. Previously published immutable tags remain valid.
 
-Each workflow run builds one candidate with an SBOM and provenance. The shared
-local/CI checks test that candidate by digest. Anonymous access and the GitHub
-Actions signing identity are verified before the same image index is promoted to
-the release tags. Run and attempt identifiers prevent reruns from overwriting an
-immutable release. Harbor receives the verified image as an optional mirror.
+Each release job builds a candidate with an SBOM and provenance. It tests the
+image by digest and verifies anonymous access and the GitHub Actions signature
+before assigning release tags to that same digest. Each build tag is unique
+within the workflow, including reruns. For production, use the build tag and
+digest from the successful job summary in `Cluster.spec.imageName`. The digest
+pins the image content and the tag lets CNPG detect the PostgreSQL major.
+[CloudNativePG image requirements](https://cloudnative-pg.io/docs/current/container_images/)
 
 ## Usage in CloudNativePG
 
@@ -53,8 +63,8 @@ metadata:
   name: my-app-db
 spec:
   instances: 1
-  # Replace with the immutable tag from a successful build's summary.
-  imageName: ghcr.io/mssaleh/cnpg-postgres-ai:18-2026-11-01-8693b7c-41288901922-1
+  # Replace with the build tag and digest from a successful job summary.
+  imageName: ghcr.io/mssaleh/cnpg-postgres-ai:18.7-YYYYMMDD-build-RUN.ATTEMPT@sha256:DIGEST
 
   postgresql:
     # TimescaleDB MUST be in shared_preload_libraries (it's a hard requirement).
@@ -84,30 +94,31 @@ spec:
 
 ## Version policy
 
-PostgreSQL and runtime extensions have minimum versions with no upper bound.
-Normal builds use the newest available packages and stable pgvectorscale release
-compatible with PostgreSQL 18 and the image architecture.
-
-- **PostgreSQL** is held at MAJOR 18 by the `ghcr.io/cloudnative-pg/postgresql:18-system-trixie`
-  base tag, with a `POSTGRESQL_MIN_VERSION` floor of 18.7. The tag floats within
-  the major, so a rebuild picks up the newest 18.x. PostgreSQL 18.7 supports an
-  in-place minor update from earlier 18.x releases without dump/restore; review
-  its [migration notes](https://www.postgresql.org/docs/release/18.7/)
-  for index maintenance and the requirement to take a new full backup when using
-  incremental backups. Its composite-type security fixes also require rebuilding
-  C extensions, and some extensions require source changes.
+- **PostgreSQL** stays on the selected minor release. The matching CNPG base tag
+  and APT preferences allow package revisions within that release, and the build
+  checks the resulting server version. APT can select compatible package
+  revisions from the PGDG archive where needed.
+- **PostgreSQL 18.6** is available for workloads that require it and for
+  preparing an upgrade to 18.7. PostgreSQL 18.7 includes security fixes and
+  migration steps for indexes and incremental backups.
+  [PostgreSQL 18.7 release notes](https://www.postgresql.org/docs/release/18.7/)
+- **PostgreSQL 19.0** has a build target. Publishing the full bundle requires
+  PostgreSQL 19 packages for TimescaleDB and Apache AGE and a matching
+  pgvectorscale release asset. Those are currently missing from the configured
+  sources. The 19.0 job can fail independently of the 18.6 and 18.7 jobs.
+  [TimescaleDB package feed](https://packagecloud.io/timescale/timescaledb)
+  [PGDG package feed](https://apt.postgresql.org/pub/repos/apt/dists/trixie-pgdg/)
+  [pgvectorscale releases](https://github.com/timescale/pgvectorscale/releases)
 - **Extensions** carry a `*_MIN_VERSION` build arg in `Dockerfile`: pgvector 0.8.7,
   pgvectorscale 0.9.1, PostGIS 3.7.0, TimescaleDB 2.32.1, Apache AGE 1.8.0~rc0.
-  apt (PGDG, Timescale) and the pgvectorscale GitHub release feed pick the newest
-  release; the build fails if resolution lands below the declared minimum.
+  APT (PGDG, Timescale) selects compatible packages. The build fails if
+  resolution lands below the declared minimum.
   Raise a minimum when an upgrade becomes mandatory — a security fix, or an
   extension SQL version the image must never fall back below.
-- **TimescaleDB 2.32.1** is required for PostgreSQL 18.7 compatibility by the
-  [upstream release notes](https://github.com/timescale/timescaledb/releases/tag/2.32.0).
-  As of 2026-11-15, the latest stable release and configured Debian package feed
-  provide only 2.32.0. Default builds therefore fail the minimum-version check
-  until a compatible package is published. Fresh-install and persistent-upgrade
-  parity must pass before this combination can be released.
+- **TimescaleDB 2.32.1** supports PostgreSQL 18.6 and 18.7. The package feed
+  provides builds for both minor releases. Upgrade TimescaleDB before moving
+  an existing PostgreSQL 18.6 database to 18.7.
+  [TimescaleDB 2.32.1 release notes](https://github.com/timescale/timescaledb/releases/tag/2.32.1)
 - **pgvector 0.8.7** is required because it fixes an IVFFlat index-build buffer
   overflow ([upstream changelog](https://github.com/pgvector/pgvector/blob/master/CHANGELOG.md)).
 - **PostGIS 3.7** supports PostgreSQL 18. Its PGDG package brings GEOS 3.15 or
@@ -116,21 +127,24 @@ compatible with PostgreSQL 18 and the image architecture.
   standardizer and TIGER geocoder are separate packages and are not bundled
   ([release notes](https://postgis.net/2026/10/PostGIS-3.7.0/),
   [coverage function requirements](https://postgis.net/docs/manual-3.7/en/ST_CoverageEdges.html)).
-- **pgvectorscale** falls back to its declared minimum if the latest release API
-  is unavailable or the latest release has no matching PostgreSQL 18 asset. The
-  build log reports this fallback; a successful build does not imply the newest
-  upstream release was used.
+- **PostGIS on 18.6** uses PGDG package revisions before
+  `3.7.0+dfsg-1.pgdg13+2`. That rebuild links against `heap_datum_check`,
+  a symbol introduced in PostgreSQL 18.7.
+  [PGDG PostGIS packages](https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgis/)
+- **pgvectorscale** falls back to its declared minimum if the latest release
+  API is unavailable or the release has no asset for the selected major and
+  architecture. The build log reports the fallback.
 - **Apache AGE** reports SQL version 1.8.0, while PGDG's PostgreSQL 18 package
   currently uses version `1.8.0~rc0`. Preserve that distinction when comparing
   package and extension versions.
-- **TimescaleDB** is installed from `timescaledb-2-postgresql-18`, which carries
+- **TimescaleDB** is installed from `timescaledb-2-postgresql-<major>`, which carries
   historical versioned `timescaledb` shared libraries as well as the newest.
   A persistent database needs its installed version's library to remain present
   until `ALTER EXTENSION timescaledb UPDATE` runs. Compatibility is qualified for
   the selected upgrade baseline, not every historical database version.
-- The weekly CI rebuild (Sun 02:00 UTC) is how the image reaches each new release.
-  Every rebuild is gated on both parity checks below, so an upstream release that
-  breaks a persistent database is caught before `18-latest` moves.
+- Pushes to `main` and the weekly rebuild (Sun 02:00 UTC) run all three jobs.
+  Manual dispatch defaults to 18.7 and accepts `postgresql_version` to select
+  another release. Each job must pass both parity checks before its aliases move.
 - **Cosign** resolves the latest stable binary independently of the installer's
   embedded default. The published v4 installer release is used because upstream
   has no floating `v4` tag. GitHub Actions summaries record package and signing
@@ -142,7 +156,8 @@ installed from the same all-libraries package and floor-checked against the
 line's first release; the other extensions still float:
 
 ```
-docker build --build-arg TIMESCALEDB_LINE=2.27 -t <registry>/cnpg-postgres-ai:18-ts2.27 .
+docker build --build-arg POSTGRESQL_VERSION=18.6 --build-arg TIMESCALEDB_LINE=2.27 \
+  -t <registry>/cnpg-postgres-ai:18.6-ts2.27 .
 ```
 
 The same option is available as `TIMESCALEDB_LINE` in local CI and
@@ -155,6 +170,7 @@ floor-checked:
 
 ```
 gh workflow run build.yml \
+  -f postgresql_version=18.7 \
   -f pgvector_version=0.8.7 \
   -f postgis_version=3.7.0 \
   -f timescaledb_version=2.32.1 \
@@ -178,16 +194,18 @@ Run the same entry point locally with Docker, Buildx, and jq. Source checks use
 the upstream Actionlint container, including ShellCheck, in both local runs and CI:
 
 ```sh
-UPGRADE_FROM_IMAGE=ghcr.io/mssaleh/cnpg-postgres-ai:18-latest \
+POSTGRESQL_VERSION=18.7 UPGRADE_FROM_IMAGE=ghcr.io/mssaleh/cnpg-postgres-ai:18-latest \
   ./scripts/local-ci.sh
 ```
 
 To verify a registry candidate without rebuilding, pass `--verify-only <image>`.
 For source checks alone, pass `--check`.
-Use an immutable deployed image as `UPGRADE_FROM_IMAGE`, or the workflow's
-`upgrade_from_image` input, to qualify that specific upgrade path. Blank workflow
-input selects the previous `18-latest`. Repeat for each deployed baseline before
-deploying; a passing previous-release test does not cover unknown older versions.
+Use an immutable deployed image as `UPGRADE_FROM_IMAGE`, or pass it as the
+workflow's `upgrade_from_image`, to qualify that upgrade path. By default CI
+tests the previous image of the selected minor release. The first 18.6 release
+uses a published 18.6 build and the first 18.7 release uses `18-latest`. The
+first 19.0 release verifies restart with persistent data using the candidate
+itself. PostgreSQL major upgrades require their own migration and qualification.
 
 ## Upgrading a persistent CNPG database
 
@@ -195,9 +213,9 @@ For a database on PostgreSQL 18.6 or earlier, first upgrade its installed
 TimescaleDB extension to 2.32.1 or newer on a PostgreSQL version supported by that
 TimescaleDB release. Restart PostgreSQL to load the updated loader, as required
 by the [TimescaleDB release notes](https://github.com/timescale/timescaledb/releases/tag/2.32.0),
-before moving to PostgreSQL 18.7. This prerequisite needs an intermediate image
-with the older PostgreSQL version; the default build targets PostgreSQL 18.7.
-The persistent-upgrade check must qualify that prepared baseline.
+before moving to PostgreSQL 18.7. The 18.6 image provides that intermediate step.
+Qualify the prepared 18.6 baseline with the persistent-upgrade check before
+moving the database.
 
 Replacing `spec.imageName` does **not** run extension upgrade SQL. After CNPG has
 rolled all instances onto the new immutable image, update TimescaleDB first in a

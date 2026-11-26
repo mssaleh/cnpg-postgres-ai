@@ -10,6 +10,11 @@ on:
       - '.dockerignore'
   workflow_dispatch:
     inputs:
+      postgresql_version:
+        description: "PostgreSQL release to build"
+        type: choice
+        options: ['18.6', '18.7', '19.0']
+        default: '18.7'
       pgvector_version:
         description: "Exact pgvector release (blank = newest stable)"
         required: false
@@ -31,18 +36,18 @@ on:
         required: false
         default: ""
       age_version:
-        description: "Exact Apache AGE release (blank = newest available PG18 package)"
+        description: "Exact Apache AGE release (blank = newest compatible package)"
         required: false
         default: ""
       upgrade_from_image:
-        description: "Upgrade baseline image (blank = previous 18-latest)"
+        description: "Upgrade baseline image (blank = previous release for this line)"
         required: false
         default: ""
   # Sunday 02:00 UTC = Sunday 06:00 Asia/Dubai.
   schedule:
     - cron: "0 2 * * 0"
 
-# Serialize promotions so an older run cannot replace a newer release.
+# Serialize workflow runs that publish to the same aliases.
 concurrency:
   group: build-${{ github.repository }}
   cancel-in-progress: false
@@ -60,8 +65,16 @@ env:
 
 jobs:
   build:
+    name: PostgreSQL ${{ matrix.postgresql }}
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        postgresql: ${{ fromJSON(inputs.postgresql_version && format('["{0}"]', inputs.postgresql_version) || '["18.6", "18.7", "19.0"]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      POSTGRESQL_VERSION: ${{ matrix.postgresql }}
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -83,11 +96,21 @@ jobs:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          date=$(date -u +'%Y-%m-%d')
-          sha=$(git rev-parse --short HEAD)
           image="${GHCR_REGISTRY}/${IMAGE_NAME}"
           image_base="${IMAGE_NAME##*/}"
-          release="18-${date}-${sha}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          date=$(date -u +'%Y-%m-%d')
+          candidate="${image}:candidate-${POSTGRESQL_VERSION}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          immutable_tags="${POSTGRESQL_VERSION}-${date//-/}-build-${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+          rolling_tags="${POSTGRESQL_VERSION}"
+          case "${POSTGRESQL_VERSION}" in
+            18.7)
+              sha=$(git rev-parse --short HEAD)
+              immutable_tags+=" 18-${date}-${sha}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              rolling_tags+=" 18 18-latest"
+              candidate+=",${image}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              ;;
+            19.0) rolling_tags+=" 19" ;;
+          esac
           if [ "${OWNER_TYPE}" = "Organization" ]; then
             package_url="https://github.com/orgs/${REPOSITORY_OWNER}/packages/container/package/${image_base}"
           else
@@ -95,14 +118,12 @@ jobs:
           fi
           {
             echo "image=${image}"
-            echo "candidate=${image}:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            echo "immutable=${image}:${release}"
-            echo "latest=${image}:18-latest"
+            echo "candidate=${candidate}"
+            echo "immutable_tags=${immutable_tags}"
+            echo "rolling_tags=${rolling_tags}"
             echo "package_url=${package_url}"
             if [ -n "${HARBOR_REGISTRY}" ]; then
-              mirror="${HARBOR_REGISTRY}/${HARBOR_PROJECT:-library}/${image_base}"
-              echo "harbor_immutable=${mirror}:${release}"
-              echo "harbor_latest=${mirror}:18-latest"
+              echo "mirror=${HARBOR_REGISTRY}/${HARBOR_PROJECT:-library}/${image_base}"
             fi
           } >> "$GITHUB_OUTPUT"
 
@@ -117,12 +138,15 @@ jobs:
           tags: ${{ steps.meta.outputs.candidate }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.POSTGRESQL_VERSION }}
           annotations: |
-            index,manifest:org.opencontainers.image.description=CloudNativePG-compatible Postgres 18 with pgvector, pgvectorscale, PostGIS, TimescaleDB, and Apache AGE.
+            index,manifest:org.opencontainers.image.description=CloudNativePG-compatible PostgreSQL ${{ env.POSTGRESQL_VERSION }} with pgvector, pgvectorscale, PostGIS, TimescaleDB, and Apache AGE.
             index,manifest:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             index,manifest:org.opencontainers.image.licenses=Apache-2.0
+            index,manifest:org.opencontainers.image.version=${{ env.POSTGRESQL_VERSION }}
           build-args: |
             CACHE_BUST=${{ github.run_id }}-${{ github.run_attempt }}
+            POSTGRESQL_VERSION=${{ env.POSTGRESQL_VERSION }}
             PGVECTOR_VERSION=${{ inputs.pgvector_version }}
             POSTGIS_VERSION=${{ inputs.postgis_version }}
             TIMESCALEDB_VERSION=${{ inputs.timescaledb_version }}
@@ -131,31 +155,54 @@ jobs:
             AGE_VERSION=${{ inputs.age_version }}
           provenance: true
           sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=postgres-${{ env.POSTGRESQL_VERSION }}
+          cache-to: type=gha,scope=postgres-${{ env.POSTGRESQL_VERSION }},mode=max
 
       - name: Verify candidate
-        run: ./scripts/local-ci.sh --verify-only "${IMAGE}@${DIGEST}"
         env:
           IMAGE: ${{ steps.meta.outputs.image }}
           DIGEST: ${{ steps.candidate.outputs.digest }}
-          UPGRADE_FROM_IMAGE: ${{ inputs.upgrade_from_image || format('ghcr.io/{0}:18-latest', github.repository) }}
+          UPGRADE_FROM_IMAGE: ${{ inputs.upgrade_from_image }}
+        run: |
+          set -euo pipefail
+          candidate="${IMAGE}@${DIGEST}"
+          baseline="${UPGRADE_FROM_IMAGE}"
+          if [ -z "${baseline}" ]; then
+            previous="${IMAGE}:${POSTGRESQL_VERSION}"
+            if result=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${previous}" 2>&1); then
+              baseline="${IMAGE}@${result}"
+            elif [[ "${result}" == *': not found' ]]; then
+              case "${POSTGRESQL_VERSION}" in
+                18.6) baseline="${IMAGE}:18-2026-11-01-8693b7c-41288901922-1" ;;
+                18.7) baseline="${IMAGE}:18-latest" ;;
+                19.0)
+                  echo "First release of PostgreSQL ${POSTGRESQL_VERSION}; verifying restart with persistent data"
+                  baseline="${candidate}"
+                  ;;
+              esac
+            else
+              printf '%s\n' "${result}" >&2
+              exit 1
+            fi
+          fi
+          echo "Persistent parity baseline: ${baseline}"
+          UPGRADE_FROM_IMAGE="${baseline}" ./scripts/local-ci.sh --verify-only "${candidate}"
 
       - name: Report resolved packages
         env:
           IMAGE: ${{ steps.meta.outputs.image }}@${{ steps.candidate.outputs.digest }}
+          TIMESCALEDB_VERSION: ${{ inputs.timescaledb_version }}
         run: |
           set -euo pipefail
+          major="${POSTGRESQL_VERSION%%.*}"
           {
             echo '## Candidate versions'
             echo '```'
-            docker run --rm --entrypoint bash "${IMAGE}" -c '
-              set -euo pipefail
-              postgres --version
-              dpkg-query -W postgresql-18-pgvector pgvectorscale-postgresql-18 \
-                postgresql-18-postgis-3 timescaledb-2-postgresql-18 \
-                timescaledb-2-loader-postgresql-18 postgresql-18-age
-            '
+            docker run --rm --entrypoint postgres "${IMAGE}" --version
+            docker run --rm --entrypoint dpkg-query "${IMAGE}" -W \
+              "postgresql-${major}-pgvector" "pgvectorscale-postgresql-${major}" \
+              "postgresql-${major}-postgis-3" "timescaledb-2${TIMESCALEDB_VERSION:+-${TIMESCALEDB_VERSION}}-postgresql-${major}" \
+              "timescaledb-2-loader-postgresql-${major}" "postgresql-${major}-age"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -203,19 +250,23 @@ jobs:
             --certificate-identity "${CERTIFICATE_IDENTITY}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
-      - name: Promote verified candidate
+      - id: promotion
+        name: Promote verified candidate
         env:
-          IMAGE: ${{ steps.meta.outputs.image }}@${{ steps.candidate.outputs.digest }}
+          IMAGE: ${{ steps.meta.outputs.image }}
           DIGEST: ${{ steps.candidate.outputs.digest }}
-          IMMUTABLE: ${{ steps.meta.outputs.immutable }}
-          LATEST: ${{ steps.meta.outputs.latest }}
+          IMMUTABLE_TAGS: ${{ steps.meta.outputs.immutable_tags }}
+          ROLLING_TAGS: ${{ steps.meta.outputs.rolling_tags }}
         run: |
           set -euo pipefail
-          docker buildx imagetools create --tag "${IMMUTABLE}" --tag "${LATEST}" "${IMAGE}"
-          for tag in "${IMMUTABLE}" "${LATEST}"; do
-            actual=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${tag}")
-            test "${actual}" = "${DIGEST}"
-          done
+          main=$(git ls-remote --exit-code origin refs/heads/main | cut -f1)
+          if [ "${GITHUB_SHA}" != "${main}" ]; then
+            echo "main has advanced; publishing build tags only"
+            ROLLING_TAGS=""
+          fi
+          read -ra tags <<< "${IMMUTABLE_TAGS} ${ROLLING_TAGS}"
+          ./scripts/promote-image.sh "${IMAGE}@${DIGEST}" "${IMAGE}" "${tags[@]}"
+          echo "rolling_tags=${ROLLING_TAGS}" >> "$GITHUB_OUTPUT"
 
       - id: harbor
         name: Mirror and sign Harbor image (best effort)
@@ -224,8 +275,9 @@ jobs:
         env:
           IMAGE: ${{ steps.meta.outputs.image }}@${{ steps.candidate.outputs.digest }}
           DIGEST: ${{ steps.candidate.outputs.digest }}
-          HARBOR_IMMUTABLE: ${{ steps.meta.outputs.harbor_immutable }}
-          HARBOR_LATEST: ${{ steps.meta.outputs.harbor_latest }}
+          MIRROR: ${{ steps.meta.outputs.mirror }}
+          IMMUTABLE_TAGS: ${{ steps.meta.outputs.immutable_tags }}
+          ROLLING_TAGS: ${{ steps.promotion.outputs.rolling_tags }}
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
           CERTIFICATE_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
@@ -238,27 +290,35 @@ jobs:
           fi
           printf '%s' "${HARBOR_PASSWORD}" | timeout 30 docker login "${HARBOR_REGISTRY}" \
             --username "${HARBOR_USERNAME}" --password-stdin
-          docker buildx imagetools create --tag "${HARBOR_IMMUTABLE}" \
-            --tag "${HARBOR_LATEST}" "${IMAGE}"
-          cosign sign "${HARBOR_IMMUTABLE}@${DIGEST}"
-          cosign verify "${HARBOR_IMMUTABLE}@${DIGEST}" \
+          read -ra immutable <<< "${IMMUTABLE_TAGS}"
+          ./scripts/promote-image.sh "${IMAGE}" "${MIRROR}" "${immutable[@]}"
+          cosign sign "${MIRROR}@${DIGEST}"
+          cosign verify "${MIRROR}@${DIGEST}" \
             --certificate-identity "${CERTIFICATE_IDENTITY}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          if [ -n "${ROLLING_TAGS}" ]; then
+            read -ra rolling <<< "${ROLLING_TAGS}"
+            ./scripts/promote-image.sh "${MIRROR}@${DIGEST}" "${MIRROR}" "${rolling[@]}"
+          fi
 
       - name: Summary
         env:
-          IMMUTABLE: ${{ steps.meta.outputs.immutable }}
-          LATEST: ${{ steps.meta.outputs.latest }}
+          IMAGE: ${{ steps.meta.outputs.image }}
+          IMMUTABLE_TAGS: ${{ steps.meta.outputs.immutable_tags }}
+          ROLLING_TAGS: ${{ steps.promotion.outputs.rolling_tags }}
           DIGEST: ${{ steps.candidate.outputs.digest }}
           COSIGN_RELEASE: ${{ steps.cosign.outputs.release }}
           HARBOR_OUTCOME: ${{ steps.harbor.outcome }}
         run: |
+          read -ra tags <<< "${IMMUTABLE_TAGS} ${ROLLING_TAGS}"
           {
-            echo '## Image published'
+            echo "## PostgreSQL ${POSTGRESQL_VERSION} image published"
             echo '```'
-            echo "${IMMUTABLE}"
-            echo "${LATEST}"
-            echo "${DIGEST}"
+            printf '%s:%s\n' "${IMAGE}" "${tags[0]}"
+            printf '%s:%s@%s\n' "${IMAGE}" "${tags[0]}" "${DIGEST}"
+            for tag in "${tags[@]:1}"; do
+              printf '%s:%s\n' "${IMAGE}" "${tag}"
+            done
             echo '```'
             echo "Cosign: ${COSIGN_RELEASE}"
             echo "Harbor mirror and signature: ${HARBOR_OUTCOME}"

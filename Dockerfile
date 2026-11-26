@@ -3,7 +3,7 @@
 # cnpg-postgres-ai
 #
 # A CloudNativePG-compatible PostgreSQL image bundling five AI / graph
-# extensions on top of the CNPG-official Postgres 18 base:
+# extensions on top of the CNPG-official PostgreSQL base:
 #
 #   - pgvector       (vector data type + HNSW/IVF indexes)
 #   - pgvectorscale  (DiskANN-backed vector index, Timescale)
@@ -18,12 +18,10 @@
 #     failover, so 2/3 of the upstream image's payload is dead weight.
 #
 # Versioning policy:
-#   - PostgreSQL MAJOR is held at 18 via the CNPG base image tag. The tag
-#     itself floats, so a rebuild picks up the newest 18.x on Debian trixie.
-#   - PostgreSQL and every extension have a minimum version with no upper bound.
-#     apt and the pgvectorscale release feed resolve the newest stable
-#     release at build time; the build fails if resolution lands below the
-#     declared minimum. Nothing is pinned to an exact patch or a digest.
+#   - PostgreSQL stays on the selected minor release. The base image and
+#     Debian package revisions can update within that release.
+#   - APT and the pgvectorscale release feed select compatible extensions
+#     subject to the declared version floors.
 #   - Raise a *_MIN_VERSION when an upgrade becomes mandatory (a security
 #     fix, or an extension SQL version the image must not fall back below).
 #   - The *_VERSION build args force one exact release instead, for parity
@@ -35,11 +33,13 @@
 #       --build-arg POSTGIS_VERSION=3.7.0
 #       --build-arg AGE_VERSION=1.8.0
 
-ARG CNPG_BASE_TAG=18-system-trixie
+ARG POSTGRESQL_VERSION=18.7
+ARG CNPG_BASE_TAG=${POSTGRESQL_VERSION}-system-trixie
 FROM ghcr.io/cloudnative-pg/postgresql:${CNPG_BASE_TAG}
 
+ARG POSTGRESQL_VERSION
 LABEL org.opencontainers.image.title="cnpg-postgres-ai"
-LABEL org.opencontainers.image.description="CloudNativePG-compatible Postgres 18 + pgvector + pgvectorscale + PostGIS + TimescaleDB (Community Edition) + Apache AGE."
+LABEL org.opencontainers.image.description="CloudNativePG-compatible PostgreSQL ${POSTGRESQL_VERSION} with pgvector, pgvectorscale, PostGIS, TimescaleDB (Community Edition), and Apache AGE."
 LABEL org.opencontainers.image.source="https://github.com/mssaleh/cnpg-postgres-ai"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.vendor="mssaleh"
@@ -51,11 +51,18 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 ARG CACHE_BUST=manual
 
-# --- Timescale apt repo (for timescaledb-2-postgresql-18) -----------------
-# pgvector + PostGIS + Apache AGE come from PGDG, which the CNPG base
-# already wires up.
-# pgvectorscale ships as a GitHub-release .deb (no apt repo for trixie yet)
-# and is installed in a second stage below.
+# Restrict the server, client and JIT packages to the requested PostgreSQL
+# release. PGDG's archive keeps extension revisions for older minor releases.
+# https://wiki.postgresql.org/wiki/Apt/FAQ
+RUN pg_major="${POSTGRESQL_VERSION%%.*}" \
+ && pg_packages="postgresql-${pg_major} postgresql-client-${pg_major} postgresql-${pg_major}-jit" \
+ && printf 'Package: %s\nPin: version %s-*\nPin-Priority: 990\n\nPackage: %s\nPin: version *\nPin-Priority: -1\n' \
+      "${pg_packages}" "${POSTGRESQL_VERSION}" "${pg_packages}" > /etc/apt/preferences.d/postgresql-release \
+ && . /etc/os-release \
+ && printf '%s\n' "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt-archive.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg-archive main" \
+      > /etc/apt/sources.list.d/pgdg-archive.list \
+ && printf '%s\n' 'Package: *' 'Pin: origin "apt-archive.postgresql.org"' 'Pin-Priority: 100' \
+      > /etc/apt/preferences.d/pgdg-archive
 
 RUN echo "cache-bust=${CACHE_BUST}" >/dev/null \
  && apt-get update \
@@ -70,8 +77,8 @@ RUN echo "cache-bust=${CACHE_BUST}" >/dev/null \
       > /etc/apt/sources.list.d/timescaledb.list
 
 # --- pgvector + PostGIS + Apache AGE (PGDG) and TimescaleDB ---------------
-# With no *_VERSION override, each package is installed unversioned so apt
-# resolves its newest candidate, then checked against the declared minimum.
+# With no *_VERSION override, APT can select an older package revision when
+# the newest requires a different PostgreSQL release.
 #
 # The comparison runs on the upstream release only, because each repository
 # decorates it differently: PGDG appends a Debian revision ("0.8.6-1.pgdg13+1")
@@ -80,20 +87,14 @@ RUN echo "cache-bust=${CACHE_BUST}" >/dev/null \
 # release-candidate marker ("1.8.0~rc0-2.pgdg13+1"), which dpkg orders below
 # a plain 1.8.0, so the minimum carries the marker too.
 #
-# timescaledb-2-postgresql-18 is not a thin metapackage: it carries every
-# historical timescaledb .so (~333 MB installed, against ~40 MB for the
-# single-version timescaledb-2-<version>-postgresql-18). That is deliberate.
-# TimescaleDB's loader resolves the library matching each database's *installed*
-# extension version, which an image swap does not change, so a persistent CNPG
-# database on an older version needs its old library present to start at all --
-# before ALTER EXTENSION timescaledb UPDATE can run. Pinning a *_VERSION picks
-# the single-version package instead and gives up that headroom.
+# The all-libraries TimescaleDB package keeps historical shared libraries
+# available until each database runs ALTER EXTENSION timescaledb UPDATE.
+# TIMESCALEDB_VERSION selects the single-version package.
 
-ARG POSTGRESQL_MIN_VERSION=18.7
 ARG PGVECTOR_MIN_VERSION=0.8.7
 ARG POSTGIS_MIN_VERSION=3.7.0
-# PostgreSQL 18.7 requires TimescaleDB 2.32.1 or newer.
-# https://github.com/timescale/timescaledb/releases/tag/2.32.0
+# 2.32.1 is compatible with both 18.6 and 18.7.
+# https://github.com/timescale/timescaledb/releases/tag/2.32.1
 ARG TIMESCALEDB_MIN_VERSION=2.32.1
 ARG AGE_MIN_VERSION=1.8.0~rc0
 
@@ -108,32 +109,64 @@ ARG AGE_VERSION
 # against the line's first release.
 ARG TIMESCALEDB_LINE
 
-RUN . /etc/os-release \
+# APT's install command fixes each named package to one candidate. Satisfy
+# lets the 3.0 solver choose compatible versions under the server constraint.
+RUN apt_request() { \
+      local package="$1" pattern="$2" versions version separator=""; \
+      if [ -z "${pattern}" ]; then \
+        printf '%s' "${package}"; \
+        return; \
+      fi; \
+      versions="$(apt-cache madison "${package}")" || return; \
+      while IFS='|' read -r _ version _; do \
+        version="${version//[[:space:]]/}"; \
+        if [[ "${version}" == ${pattern} ]]; then \
+          printf '%s%s (= %s)' "${separator}" "${package}" "${version}"; \
+          separator=" | "; \
+        fi; \
+      done <<< "${versions}"; \
+      if [ -z "${separator}" ]; then \
+        echo "ERROR: no ${package} version matches ${pattern}" >&2; return 1; \
+      fi; \
+    } \
+ && . /etc/os-release \
+ && pg_major="${POSTGRESQL_VERSION%%.*}" \
+ && pg_revision="$(dpkg-query -W -f='${Version}' "postgresql-${pg_major}")" \
  && apt-get update \
- && pgvector_pkg="postgresql-18-pgvector${PGVECTOR_VERSION:+=${PGVECTOR_VERSION}*}" \
- && postgis_pkg="postgresql-18-postgis-3${POSTGIS_VERSION:+=${POSTGIS_VERSION}*}" \
- && age_pkg="postgresql-18-age${AGE_VERSION:+=${AGE_VERSION}~rc0*}" \
- && timescaledb_min="${TIMESCALEDB_MIN_VERSION}" \
- && if [ -n "${TIMESCALEDB_VERSION:-}" ]; then \
-      timescaledb_pkg="timescaledb-2-${TIMESCALEDB_VERSION}-postgresql-18"; \
-      timescaledb_spec="${timescaledb_pkg}"; \
-      loader_pkg="timescaledb-2-loader-postgresql-18=${TIMESCALEDB_VERSION}~debian${VERSION_ID}*"; \
-    elif [ -n "${TIMESCALEDB_LINE:-}" ]; then \
-      timescaledb_pkg="timescaledb-2-postgresql-18"; \
-      timescaledb_spec="${timescaledb_pkg}=${TIMESCALEDB_LINE}.*"; \
-      loader_pkg="timescaledb-2-loader-postgresql-18=${TIMESCALEDB_LINE}.*"; \
-      timescaledb_min="${TIMESCALEDB_LINE}.0"; \
-    else \
-      timescaledb_pkg="timescaledb-2-postgresql-18"; \
-      timescaledb_spec="${timescaledb_pkg}"; \
-      loader_pkg="timescaledb-2-loader-postgresql-18"; \
+ && pgvector_pkg="postgresql-${pg_major}-pgvector" \
+ && postgis_pkg="postgresql-${pg_major}-postgis-3" \
+ && age_pkg="postgresql-${pg_major}-age" \
+ && timescaledb_pkg="timescaledb-2-postgresql-${pg_major}" \
+ && loader_pkg="timescaledb-2-loader-postgresql-${pg_major}" \
+ && postgis_abi=() \
+ # PGDG's +2 revision needs heap_datum_check from 18.7, absent from Depends.
+ && if [ "${POSTGRESQL_VERSION}" = 18.6 ]; then \
+      postgis_abi=( "${postgis_pkg} (<< 3.7.0+dfsg-1.pgdg13+2)" \
+                    "${postgis_pkg}-scripts (<< 3.7.0+dfsg-1.pgdg13+2)" ); \
     fi \
- && apt-get install -y --no-install-recommends --allow-downgrades \
-      "${pgvector_pkg}" \
-      "${postgis_pkg}" \
-      "${age_pkg}" \
-      "${timescaledb_spec}" \
-      "${loader_pkg}" \
+ && timescaledb_min="${TIMESCALEDB_MIN_VERSION}" \
+ && timescaledb_pattern="" loader_pattern="" \
+ && if [ -n "${TIMESCALEDB_VERSION:-}" ]; then \
+      timescaledb_pkg="timescaledb-2-${TIMESCALEDB_VERSION}-postgresql-${pg_major}"; \
+      loader_pattern="${TIMESCALEDB_VERSION}~debian${VERSION_ID}*"; \
+    elif [ -n "${TIMESCALEDB_LINE:-}" ]; then \
+      timescaledb_pattern="${TIMESCALEDB_LINE}.*"; \
+      loader_pattern="${timescaledb_pattern}"; \
+      timescaledb_min="${TIMESCALEDB_LINE}.0"; \
+    fi \
+ && pgvector_request="$(apt_request "${pgvector_pkg}" "${PGVECTOR_VERSION:+${PGVECTOR_VERSION}*}")" \
+ && postgis_request="$(apt_request "${postgis_pkg}" "${POSTGIS_VERSION:+${POSTGIS_VERSION}*}")" \
+ && age_request="$(apt_request "${age_pkg}" "${AGE_VERSION:+${AGE_VERSION}~rc0*}")" \
+ && timescaledb_request="$(apt_request "${timescaledb_pkg}" "${timescaledb_pattern}")" \
+ && loader_request="$(apt_request "${loader_pkg}" "${loader_pattern}")" \
+ && apt-get --solver 3.0 --no-strict-pinning \
+      satisfy -y --no-install-recommends --no-remove --allow-downgrades \
+      "postgresql-${pg_major} (= ${pg_revision})" \
+      "postgresql-client-${pg_major} (= ${pg_revision})" \
+      "postgresql-${pg_major}-jit (= ${pg_revision})" \
+      "${pgvector_request}" "${postgis_request}" "${age_request}" \
+      "${timescaledb_request}" "${loader_request}" \
+      "${postgis_abi[@]}" \
  && if [ -n "${TIMESCALEDB_LINE:-}" ]; then \
       installed="$(dpkg-query -s "${timescaledb_pkg}" | sed -n 's/^Version: //p')"; \
       case "${installed}" in \
@@ -142,10 +175,9 @@ RUN . /etc/os-release \
       esac; \
     fi \
  && for spec in \
-      "postgresql-18 ${POSTGRESQL_MIN_VERSION}" \
-      "postgresql-18-pgvector ${PGVECTOR_MIN_VERSION} ${PGVECTOR_VERSION:-}" \
-      "postgresql-18-postgis-3 ${POSTGIS_MIN_VERSION} ${POSTGIS_VERSION:-}" \
-      "postgresql-18-age ${AGE_MIN_VERSION} ${AGE_VERSION:-}" \
+      "postgresql-${pg_major}-pgvector ${PGVECTOR_MIN_VERSION} ${PGVECTOR_VERSION:-}" \
+      "postgresql-${pg_major}-postgis-3 ${POSTGIS_MIN_VERSION} ${POSTGIS_VERSION:-}" \
+      "postgresql-${pg_major}-age ${AGE_MIN_VERSION} ${AGE_VERSION:-}" \
       "${timescaledb_pkg} ${timescaledb_min} ${TIMESCALEDB_VERSION:-}" ; do \
       set -- ${spec}; \
       installed="$(dpkg-query -s "$1" | sed -n 's/^Version: //p')"; \
@@ -171,15 +203,15 @@ RUN . /etc/os-release \
 # There is no apt repo, so "newest stable" comes from the GitHub releases
 # feed, which excludes drafts and prereleases. Three things make the newest
 # release unusable: the API is unreachable or rate-limited, the release
-# predates the declared minimum, or it ships no pg18 asset for this arch.
-# Each falls back to the declared minimum, which is a published release
-# known to carry that asset.
+# predates the declared minimum, or it ships no asset for this major and
+# architecture. Each falls back to the declared minimum.
 
 ARG PGVECTORSCALE_MIN_VERSION=0.9.1
 ARG PGVECTORSCALE_VERSION
 ARG TARGETARCH=amd64
 
-RUN case "${TARGETARCH}" in \
+RUN pg_major="${POSTGRESQL_VERSION%%.*}" \
+ && case "${TARGETARCH}" in \
       amd64|arm64) pgvs_arch="${TARGETARCH}" ;; \
       *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac \
@@ -190,7 +222,7 @@ RUN case "${TARGETARCH}" in \
       release="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
         https://api.github.com/repos/timescale/pgvectorscale/releases/latest || true)"; \
       latest="$(printf '%s' "${release}" | jq -r '.tag_name // empty' 2>/dev/null || true)"; \
-      asset="pgvectorscale-${latest}-pg18-${pgvs_arch}.zip"; \
+      asset="pgvectorscale-${latest}-pg${pg_major}-${pgvs_arch}.zip"; \
       if [ -n "${latest}" ] \
          && dpkg --compare-versions "${latest}" ge "${PGVECTORSCALE_MIN_VERSION}" \
          && printf '%s' "${release}" | jq -e --arg n "${asset}" '[.assets[].name] | index($n)' >/dev/null; then \
@@ -202,9 +234,9 @@ RUN case "${TARGETARCH}" in \
       fi; \
     fi \
  && curl -fsSL -o /tmp/pgvs.zip \
-      "https://github.com/timescale/pgvectorscale/releases/download/${pgvs_tag}/pgvectorscale-${pgvs_tag}-pg18-${pgvs_arch}.zip" \
+      "https://github.com/timescale/pgvectorscale/releases/download/${pgvs_tag}/pgvectorscale-${pgvs_tag}-pg${pg_major}-${pgvs_arch}.zip" \
  && unzip -d /tmp/pgvs /tmp/pgvs.zip \
- && dpkg -i "/tmp/pgvs/pgvectorscale-postgresql-18_${pgvs_tag}-Linux_${pgvs_arch}.deb" \
+ && dpkg -i "/tmp/pgvs/pgvectorscale-postgresql-${pg_major}_${pgvs_tag}-Linux_${pgvs_arch}.deb" \
  && rm -rf /tmp/pgvs /tmp/pgvs.zip
 
 # --- Cleanup --------------------------------------------------------------
@@ -212,7 +244,11 @@ RUN case "${TARGETARCH}" in \
 # runtime for outbound TLS, e.g. timescaledb-tune or pg extensions making
 # outbound HTTPS calls).
 RUN apt-get purge -y --auto-remove gnupg jq unzip \
- && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/*
+ && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/* \
+ && actual="$(postgres --version | cut -d ' ' -f 3)" \
+ && if [ "${actual}" != "${POSTGRESQL_VERSION}" ]; then \
+      echo "ERROR: PostgreSQL ${actual} does not match ${POSTGRESQL_VERSION}" >&2; exit 1; \
+    fi
 
 # CNPG operator drives postgres lifecycle as UID 26.
 USER 26

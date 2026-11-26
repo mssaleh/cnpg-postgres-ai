@@ -19,8 +19,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker image inspect "${OLD_IMG}" >/dev/null
-docker image inspect "${NEW_IMG}" >/dev/null
+old_version="$(docker run --rm --entrypoint postgres "${OLD_IMG}" --version | cut -d ' ' -f 3)"
+new_version="$(docker run --rm --entrypoint postgres "${NEW_IMG}" --version | cut -d ' ' -f 3)"
+if [[ ! "${old_version}" =~ ^[0-9]+\.[0-9]+$ || ! "${new_version}" =~ ^[0-9]+\.[0-9]+$ ]]; then
+  echo "Persistent parity requires released PostgreSQL versions, found ${old_version} and ${new_version}" >&2
+  exit 1
+fi
+if [[ "${old_version%.*}" != "${new_version%.*}" ]] || (( 10#${old_version#*.} > 10#${new_version#*.} )); then
+  echo "Persistent parity requires a same-major upgrade, found PostgreSQL ${old_version} to ${new_version}" >&2
+  exit 1
+fi
+
 docker volume create "${VOLUME}" >/dev/null
 docker run --rm --user root -v "${VOLUME}:/pgdata" --entrypoint bash "${OLD_IMG}" \
   -c 'install -d -o 26 -g 26 /pgdata'
@@ -30,7 +39,7 @@ start_postgres() {
   docker run -d --name "${name}" --user 26 -v "${VOLUME}:/pgdata" \
     --entrypoint bash "${image}" -c '
       set -e
-      export PATH=/usr/lib/postgresql/18/bin:$PATH PGDATA=/pgdata
+      export PGDATA=/pgdata
       if [ ! -s "$PGDATA/PG_VERSION" ]; then
         initdb -D "$PGDATA" --auth=trust --username=postgres >/dev/null
         echo "shared_preload_libraries = '\''timescaledb,age'\''" >> "$PGDATA/postgresql.conf"
@@ -54,6 +63,16 @@ wait_ready() {
 
 start_postgres "${OLD_IMG}" "${OLD_CONTAINER}"
 wait_ready "${OLD_CONTAINER}"
+
+if [[ "${old_version}" == 18.[0-6] && "${new_version}" != 18.[0-6] ]]; then
+  prepared="$(docker exec "${OLD_CONTAINER}" psql -XqAt -h localhost -U postgres -d postgres \
+    -v ON_ERROR_STOP=1 -c "SELECT string_to_array(default_version, '.')::int[] >= ARRAY[2,32,1]
+      FROM pg_available_extensions WHERE name = 'timescaledb'")"
+  if [ "${prepared}" != t ]; then
+    echo "Upgrade the PostgreSQL ${old_version} baseline to TimescaleDB 2.32.1 or newer first" >&2
+    exit 1
+  fi
+fi
 
 docker exec "${OLD_CONTAINER}" psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "
   CREATE EXTENSION vector;

@@ -24,7 +24,9 @@ UPGRADE_BASE=""
 
 git diff --check
 git diff --cached --check
-bash -n scripts/parity-check.sh scripts/upgrade-parity-check.sh scripts/local-ci.sh
+for script in scripts/*.sh; do
+  bash -n "${script}"
+done
 docker run --rm -v "${ROOT_DIR}:/repo:ro" -w /repo --entrypoint sh \
   rhysd/actionlint:latest -c 'set -eu; actionlint; shellcheck scripts/*.sh'
 
@@ -49,6 +51,7 @@ else
     --load \
     --tag "${IMAGE}" \
     --build-arg "CACHE_BUST=${CACHE_BUST}" \
+    --build-arg POSTGRESQL_VERSION \
     --build-arg "PGVECTOR_VERSION=${PGVECTOR_VERSION:-}" \
     --build-arg "POSTGIS_VERSION=${POSTGIS_VERSION:-}" \
     --build-arg "TIMESCALEDB_VERSION=${TIMESCALEDB_VERSION:-}" \

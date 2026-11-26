@@ -23,7 +23,7 @@ trap cleanup EXIT
 
 docker run -d --name "${CONTAINER_NAME}" --entrypoint bash "${IMG}" -c '
   set -e
-  export PATH=/usr/lib/postgresql/18/bin:$PATH PGDATA=/tmp/pgdata
+  export PGDATA=/tmp/pgdata
   mkdir -p "$PGDATA" && chmod 700 "$PGDATA"
   initdb -D "$PGDATA" --auth=trust --username=postgres >/dev/null
   echo "shared_preload_libraries = '\''timescaledb,age'\''" >> "$PGDATA/postgresql.conf"
@@ -40,6 +40,14 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 "${ready}"
+
+if [ -n "${POSTGRESQL_VERSION:-}" ]; then
+  actual="$(docker exec "${CONTAINER_NAME}" postgres --version | cut -d ' ' -f 3)"
+  if [ "${actual}" != "${POSTGRESQL_VERSION}" ]; then
+    echo "Expected PostgreSQL ${POSTGRESQL_VERSION}, found ${actual}" >&2
+    exit 1
+  fi
+fi
 
 docker exec -i "${CONTAINER_NAME}" psql -X -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
 CREATE EXTENSION vector;
